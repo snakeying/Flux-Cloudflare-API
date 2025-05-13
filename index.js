@@ -27,6 +27,7 @@ Convert user input into a concise, effective text-to-image prompt for image gene
 
 ## YOUR PROCESS & FULL RESPONSE STRUCTURE
 1.  **Think Step (Internal Monologue):** First, think about the request. This thinking process MUST be enclosed in <think></think> tags.
+tags.
 2.  **Image Prompt Output:** Immediately AFTER the closing </think> tag, you MUST provide the generated image prompt.
 
 ## IMAGE PROMPT SPECIFICATIONS (This applies to the part of your response AFTER </think>)
@@ -86,7 +87,7 @@ async function handleChatCompletions(request) {
     return await handleImageGeneration(requestData, request);
   } catch (error) {
     console.error('处理 chat completions 请求时出错:', error.message, error.stack);
-    if (error.message.includes("配置错误:") || error.message.includes("configuration error:") || error.message.includes("所有图像生成 API 密钥均尝试失败")) { // Added check for multi-key failure message
+    if (error.message.includes("配置错误:") || error.message.includes("configuration error:") || error.message.includes("所有图像生成 API 密钥均尝试失败")) {
         return new Response(JSON.stringify({ error: { message: error.message, type: "configuration_error", code: "env_config_error" } }), { status: 500, headers: { 'Content-Type': 'application/json' } });
     }
     return new Response(JSON.stringify({ error: { message: `处理请求时出错: ${error.message}`, type: "server_error", code: "internal_error" } }), { status: 500, headers: { 'Content-Type': 'application/json' } });
@@ -107,8 +108,8 @@ async function handleImageGeneration(requestData, request) {
   const revisedPrompt = await reviseSentenceToPrompt(userPrompt);
   if (!revisedPrompt || revisedPrompt.trim() === "") throw new Error("Prompt 优化后为空，无法生成图像。");
 
-  const originalImageUrl = await generateImage(revisedPrompt, imageSize); // This will now use the multi-key logic
-  if (!originalImageUrl) throw new Error('图像生成服务未返回有效的图像 URL (所有Key尝试后依然失败)'); // Should be caught by generateImage, but good to have a fallback message
+  const originalImageUrl = await generateImage(revisedPrompt, imageSize);
+  if (!originalImageUrl) throw new Error('图像生成服务未返回有效的图像 URL (所有Key尝试后依然失败)');
 
   const encodedImageUrl = encodeURIComponent(originalImageUrl);
   const proxyImageUrl = `${new URL(request.url).origin}/image-proxy?url=${encodedImageUrl}`;
@@ -175,13 +176,19 @@ async function reviseSentenceToPrompt(sentence) {
 
   let rawModelOutput = data.choices[0].message.content;
   console.log(`提示词优化模型 (${chosenModelName}) 返回的原始输出: "${rawModelOutput}"`);
+
   let actualPrompt = "";
+  let thinkingProcess = ""; // <--- 声明 thinkingProcess
 
   if (isReasoningMode) {
     const thinkStartTag = "<think>"; const thinkEndTag = "</think>";
     const thinkStartIndex = rawModelOutput.indexOf(thinkStartTag);
     const thinkEndIndex = rawModelOutput.indexOf(thinkEndTag, thinkStartIndex);
     if (thinkStartIndex !== -1 && thinkEndIndex !== -1 && thinkEndIndex > thinkStartIndex) {
+      // --- 提取并记录思考过程 ---
+      thinkingProcess = rawModelOutput.substring(thinkStartIndex + thinkStartTag.length, thinkEndIndex).trim();
+      console.log(`(推理模式) 提取到的思考过程: "${thinkingProcess}"`); // <--- 打印思考过程
+      // --- 思考过程提取结束 ---
       actualPrompt = rawModelOutput.substring(thinkEndIndex + thinkEndTag.length).trim();
       console.log(`(推理模式) 初步图像 prompt: "${actualPrompt}"`);
     } else {
@@ -204,38 +211,37 @@ async function reviseSentenceToPrompt(sentence) {
   return actualPrompt;
 }
 
-// 函数：生成图像 (支持多KEY轮值，简化版Key解析)
+// 函数：生成图像 (支持多KEY轮值)
 async function generateImage(prompt, imageSize) {
   console.log(`使用提示词生成图像: "${prompt}", 尺寸: ${imageSize}`);
 
   const imageApiBaseUrl = env('IMAGE_GEN_API_BASE');
   const imageModelName = env('IMAGE_GEN_MODEL');
-  const imageApiKeysString = env('IMAGE_GEN_API_KEY'); // 读取原始的逗号分隔的密钥字符串
+  const imageApiKeysString = env('IMAGE_GEN_API_KEY');
 
-  // 基础配置检查
   if (!imageApiBaseUrl || imageApiBaseUrl.trim() === "") {
     throw new Error("图像生成配置错误: 环境变量 IMAGE_GEN_API_BASE 未设置或为空。");
   }
   if (!imageModelName || imageModelName.trim() === "") {
     throw new Error("图像生成配置错误: 环境变量 IMAGE_GEN_MODEL 未设置或为空。");
   }
-  if (!imageApiKeysString || imageApiKeysString.trim() === "") { // 检查原始字符串是否为空
+  if (!imageApiKeysString || imageApiKeysString.trim() === "") {
     throw new Error("图像生成配置错误: 环境变量 IMAGE_GEN_API_KEY 未设置或为空。");
   }
 
-  // 解析 API 密钥列表 (简化版，假设用户输入格式规范 'key1,key2,...')
   const apiKeys = imageApiKeysString.split(',')
-    .filter(key => key !== ""); // 过滤掉因连续逗号或末尾逗号产生的空字符串
+    .map(key => key.trim()) // Trim each key
+    .filter(key => key !== ""); 
 
   if (apiKeys.length === 0) {
-    throw new Error("图像生成配置错误: IMAGE_GEN_API_KEY 配置了无效的密钥 (例如，只有逗号或解析后无可用密钥)。请确保格式为 'key1,key2,key3'。");
+    throw new Error("图像生成配置错误: IMAGE_GEN_API_KEY 配置了无效的密钥。请确保格式为 'key1,key2,key3' 且密钥非空。");
   }
 
-  let lastError = null; // 用于存储最后一次API调用失败时的错误信息
+  let lastError = null;
 
   for (let i = 0; i < apiKeys.length; i++) {
     const apiKey = apiKeys[i];
-    console.log(`尝试使用 API 密钥 (索引: ${i}) 调用图像生成 API (${imageApiBaseUrl.trim()}) (模型: ${imageModelName.trim()})`);
+    console.log(`尝试使用 API 密钥 (索引: ${i}, Key: ...${apiKey.slice(-4)}) 调用图像生成 API (${imageApiBaseUrl.trim()}) (模型: ${imageModelName.trim()})`); // Log partial key
     const requestBody = {
       prompt: prompt,
       image_size: imageSize,
@@ -247,7 +253,7 @@ async function generateImage(prompt, imageSize) {
       const response = await fetch(imageApiBaseUrl.trim(), {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${apiKey}`, // 使用当前轮值的 API Key
+          'Authorization': `Bearer ${apiKey}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify(requestBody),
@@ -257,28 +263,24 @@ async function generateImage(prompt, imageSize) {
         const data = await response.json();
         if (data.images && data.images.length > 0 && data.images[0].url) {
           console.log(`使用模型 ${imageModelName.trim()} 和密钥 (索引: ${i}) 在 ${imageApiBaseUrl.trim()} 成功生成的图像 URL: ${data.images[0].url}`);
-          return data.images[0].url; // 成功获取图像，直接返回
+          return data.images[0].url;
         } else {
           lastError = `API响应格式异常(图像生成，模型: ${imageModelName.trim()}): 未找到图像URL。响应内容: ${JSON.stringify(data, null, 2)}`;
           console.error(lastError + ` (使用密钥索引: ${i})`);
-          // 继续尝试下一个key
         }
       } else {
         const errorText = await response.text();
         lastError = `图像 API 响应状态码: ${response.status} ${response.statusText || ''} (模型: ${imageModelName.trim()}). 详细错误: ${errorText}`;
         console.error(lastError + ` (使用密钥索引: ${i})`);
-        // 继续尝试下一个key
       }
     } catch (fetchError) {
       lastError = `调用图像 API 时发生网络或其他错误: ${fetchError.message}`;
       console.error(lastError + ` (使用密钥索引: ${i})`);
-      // 继续尝试下一个key
     }
   }
 
-  // 如果循环结束还没有返回，说明所有 key 都尝试失败了
   console.error("所有 IMAGE_GEN_API_KEY 均尝试失败。");
-  const finalErrorMessage = `所有图像生成 API 密钥均尝试失败。最后一次错误: ${lastError || '未知错误'}。请检查 IMAGE_GEN_API_KEY 的配置 (确保格式为 'key1,key2,key3' 且密钥有效) 以及上游图像生成服务状态。`;
+  const finalErrorMessage = `所有图像生成 API 密钥均尝试失败。最后一次错误: ${lastError || '未知错误'}。请检查 IMAGE_GEN_API_KEY 的配置以及上游图像生成服务状态。`;
   throw new Error(finalErrorMessage);
 }
 
@@ -306,7 +308,6 @@ async function handleImageProxy(request) {
     const contentType = imageResponse.headers.get('Content-Type') || 'image/jpeg';
     const imageArrayBuffer = await imageResponse.arrayBuffer();
     const headers = new Headers({ 'Content-Type': contentType, 'Content-Disposition': 'inline' });
-    // headers.set('Cache-Control', 'public, max-age=3600'); // Optional caching
     return new Response(imageArrayBuffer, { status: 200, headers: headers });
   } catch (error) {
     console.error('代理图片时出错:', error.message, error.stack);
@@ -322,13 +323,13 @@ async function handleRequest(request) {
 
   try {
     if (path === '/') {
-      const readmeUrl = "https://github.com/snakeying/Flux-Cloudflare-API";
+      const readmeUrl = "https://github.com/snakeying/Flux-Cloudflare-API"; // 你提供的链接
       const welcomeMessageHtml = `
         <!DOCTYPE html>
         <html lang="zh-CN">
         <head>
             <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <meta name="viewport" content="width=device-width, initial-scale-1.0">
             <title>图像生成服务</title>
             <style>
                 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f4f6f8; text-align: center; color: #333; padding: 20px; box-sizing: border-box; }
@@ -371,7 +372,6 @@ async function handleRequest(request) {
     }
   } catch (e) {
     console.error("主处理程序错误:", e.message, e.stack);
-    // 确保配置错误和多Key全部失败的错误能被正确归类并返回500
     if (e.message.includes("配置错误:") || e.message.includes("configuration error:") || e.message.includes("所有图像生成 API 密钥均尝试失败")) {
       return new Response(JSON.stringify({ error: { message: e.message, type: "configuration_error", code: "env_config_error" } }), { status: 500, headers: { 'Content-Type': 'application/json' } });
     }
@@ -382,7 +382,6 @@ async function handleRequest(request) {
 addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request).catch(err => {
     console.error("Fetch事件最终错误:", err.message, err.stack);
-    // 确保配置错误和多Key全部失败的错误能被正确归类并返回500
     if (err.message.includes("配置错误:") || err.message.includes("configuration error:") || err.message.includes("所有图像生成 API 密钥均尝试失败")) {
       return new Response(JSON.stringify({ error: { message: err.message, type: "configuration_error", code: "env_config_error" } }), { status: 500, headers: { 'Content-Type': 'application/json' } });
     }
