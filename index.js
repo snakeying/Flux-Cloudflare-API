@@ -27,7 +27,6 @@ Convert user input into a concise, effective text-to-image prompt for image gene
 
 ## YOUR PROCESS & FULL RESPONSE STRUCTURE
 1.  **Think Step (Internal Monologue):** First, think about the request. This thinking process MUST be enclosed in <think></think> tags.
-tags.
 2.  **Image Prompt Output:** Immediately AFTER the closing </think> tag, you MUST provide the generated image prompt.
 
 ## IMAGE PROMPT SPECIFICATIONS (This applies to the part of your response AFTER </think>)
