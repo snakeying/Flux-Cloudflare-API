@@ -82,9 +82,8 @@ async function handleImageGeneration(requestData, request) {
         console.log(`构建的代理 URL: ${proxyImageUrl}`);
 
         // --- 确保 content 字段只包含 Markdown 图片链接 ---
-        // 使用占位符来避免在聊天界面中被渲染
-        const markdownImageString = `![Image](${proxyImageUrl})`;
-
+        const promptTextForDisplay = revisedPrompt;
+        const markdownImageString = `![Image](${proxyImageUrl})\n\n优化后的提示词: ${promptTextForDisplay}`;
 
         return new Response(JSON.stringify({
           id: `imggen-${Date.now()}`,
