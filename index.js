@@ -70,7 +70,49 @@ async function handleModels(request) {
   if (!validateWorkerApiKey(request)) {
     return new Response(JSON.stringify({ error: { message: "认证失败，无效的 API 密钥", type: "invalid_request_error", code: "invalid_api_key" } }), { status: 401, headers: { 'Content-Type': 'application/json' } });
   }
-  const modelsData = [{ id: "flux-image-gen", object: "model", created: Math.floor(Date.now() / 1000) - 8000, owned_by: "organization-owner", permission: [{ id: "modelperm-flux-img", object: "model_permission", created: Math.floor(Date.now() / 1000) - 8000, allow_create_engine: false, allow_sampling: true, allow_logprobs: false, allow_search_indices: false, allow_view: true, allow_fine_tuning: false, organization: "*", group: null, is_blocking: false }], root: "flux-image-gen", parent: null }];
+
+  // --- MODIFIED: Dynamically generate model list based on IMAGE_GEN_MODEL ---
+  const imageGenModelEnv = env('IMAGE_GEN_MODEL');
+  let modelsData = [];
+
+  if (imageGenModelEnv && imageGenModelEnv.trim() !== "") {
+    const modelNames = imageGenModelEnv.split(',').map(name => name.trim()).filter(name => name);
+    if (modelNames.length > 0) {
+      modelsData = modelNames.map(modelId => ({
+        id: modelId,
+        object: "model",
+        created: Math.floor(Date.now() / 1000) - 8000, // Consistent timestamp logic
+        owned_by: "organization-owner", // Can be made configurable if needed
+        permission: [{
+          id: `modelperm-${modelId.replace(/[^a-zA-Z0-9-_]/g, '_')}`, // Ensure valid ID
+          object: "model_permission",
+          created: Math.floor(Date.now() / 1000) - 8000,
+          allow_create_engine: false,
+          allow_sampling: true,
+          allow_logprobs: false,
+          allow_search_indices: false,
+          allow_view: true,
+          allow_fine_tuning: false,
+          organization: "*",
+          group: null,
+          is_blocking: false
+        }],
+        root: modelId,
+        parent: null
+      }));
+      console.log(`模型列表接口: 成功加载 ${modelNames.length} 个模型: ${modelNames.join(', ')}`);
+    } else {
+      console.warn("模型列表接口: IMAGE_GEN_MODEL 环境变量已设置但解析后为空列表。");
+      // Fallback to a default or empty list if IMAGE_GEN_MODEL is set but results in no models
+      modelsData = [{ id: "flux-image-gen-default-config-issue", object: "model", /* ... minimal valid structure ... */ }];
+    }
+  } else {
+    console.warn("模型列表接口: IMAGE_GEN_MODEL 环境变量未设置或为空。返回默认模型 'flux-image-gen-default'。");
+    // Fallback if IMAGE_GEN_MODEL is not set - original behavior or a defined default
+    modelsData = [{ id: "flux-image-gen-default", object: "model", created: Math.floor(Date.now() / 1000) - 8000, owned_by: "organization-owner", permission: [{ id: "modelperm-flux-img-default", object: "model_permission", created: Math.floor(Date.now() / 1000) - 8000, allow_create_engine: false, allow_sampling: true, allow_logprobs: false, allow_search_indices: false, allow_view: true, allow_fine_tuning: false, organization: "*", group: null, is_blocking: false }], root: "flux-image-gen-default", parent: null }];
+  }
+  // --- END MODIFICATION ---
+
   return new Response(JSON.stringify({ object: "list", data: modelsData }), { headers: { 'Content-Type': 'application/json' } });
 }
 
@@ -78,12 +120,66 @@ async function handleModels(request) {
 async function handleChatCompletions(request) {
   if (request.method !== 'POST') return new Response(JSON.stringify({ error: { message: "方法不允许，请使用 POST 请求", type: "invalid_request_error", code:"method_not_allowed" } }), { status: 405, headers: { 'Content-Type': 'application/json' } });
   if (!validateWorkerApiKey(request)) return new Response(JSON.stringify({ error: { message: "认证失败，无效的 API 密钥", type: "invalid_request_error", code:"invalid_api_key" } }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+
   let requestData;
   try { requestData = await request.json(); } catch (e) { return new Response(JSON.stringify({ error: { message: "无法解析请求体，请提供有效的 JSON", type: "invalid_request_error", code:"invalid_json" } }), { status: 400, headers: { 'Content-Type': 'application/json' } }); }
   if (!requestData.messages || !Array.isArray(requestData.messages) || requestData.messages.length === 0) return new Response(JSON.stringify({ error: { message: "请求缺少必需的 messages 字段或格式不正确", type: "invalid_request_error", code:"invalid_parameters" } }), { status: 400, headers: { 'Content-Type': 'application/json' } });
 
+  // --- ADDED: Validate requestData.model (Strict Mode) ---
+  const requestedModelUntrimmed = requestData.model; // Keep original for logging if needed, but use trimmed for logic
+
+  if (!requestedModelUntrimmed || typeof requestedModelUntrimmed !== 'string' || requestedModelUntrimmed.trim() === "") {
+    console.warn(`Chat Completions: 请求体缺少 'model' 字段或为空。请求体: ${JSON.stringify(requestData)}`);
+    return new Response(JSON.stringify({
+      error: {
+        message: "请求体中必须包含有效的 'model' 字段，用于指定图像生成模型。",
+        type: "invalid_request_error",
+        code: "missing_model_field"
+      }
+    }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+  }
+  const requestedModel = requestedModelUntrimmed.trim(); // Use trimmed version from now on
+
+  const allowedModelsString = env('IMAGE_GEN_MODEL');
+  if (!allowedModelsString || allowedModelsString.trim() === "") {
+    console.error("Chat Completions 配置错误: IMAGE_GEN_MODEL 环境变量未设置或为空。无法验证用户请求的模型。");
+    return new Response(JSON.stringify({
+      error: {
+        message: "服务器配置错误：可用的图像生成模型列表未配置。",
+        type: "configuration_error", // More specific than server_error for this case
+        code: "image_models_not_configured"
+      }
+    }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  const allowedModels = allowedModelsString.split(',').map(name => name.trim()).filter(name => name);
+  if (allowedModels.length === 0) {
+      console.error(`Chat Completions 配置错误: IMAGE_GEN_MODEL 环境变量 ("${allowedModelsString}") 配置无效，解析后无可用模型。`);
+      return new Response(JSON.stringify({
+        error: {
+          message: "服务器配置错误：可用的图像生成模型列表配置无效。",
+          type: "configuration_error",
+          code: "image_models_invalid_config"
+        }
+      }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  if (!allowedModels.includes(requestedModel)) {
+    console.warn(`Chat Completions: 用户请求的模型 '${requestedModel}' 不在允许的列表 [${allowedModels.join(', ')}] 中。`);
+    return new Response(JSON.stringify({
+      error: {
+        message: `请求的图像生成模型 '${requestedModel}' 不受支持。可用的模型有: ${allowedModels.join(', ')}。`,
+        type: "invalid_request_error",
+        code: "unsupported_image_model"
+      }
+    }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+  }
+  console.log(`Chat Completions: 用户请求使用模型 '${requestedModel}' (已通过验证)。`);
+  // --- END ADDED VALIDATION ---
+
   try {
-    return await handleImageGeneration(requestData, request);
+    // Pass the validated requestedModel to handleImageGeneration
+    return await handleImageGeneration(requestData, request, requestedModel);
   } catch (error) {
     console.error('处理 chat completions 请求时出错:', error.message, error.stack);
     if (error.message.includes("配置错误:") || error.message.includes("configuration error:") || error.message.includes("所有图像生成 API 密钥均尝试失败")) {
@@ -94,7 +190,8 @@ async function handleChatCompletions(request) {
 }
 
 // 处理图像生成请求
-async function handleImageGeneration(requestData, request) {
+// MODIFIED: Added chosenModelName parameter
+async function handleImageGeneration(requestData, request, chosenModelName) {
   const lastMessage = requestData.messages[requestData.messages.length - 1];
   let userPrompt = lastMessage.content;
   let imageSize = '1024x1024';
@@ -102,21 +199,26 @@ async function handleImageGeneration(requestData, request) {
   if (sizeMatch && sizeMatch[1]) {
       userPrompt = userPrompt.replace(sizeMatch[1], '').trim();
       imageSize = getImageSize(sizeMatch[1]);
+      console.log(`图像尺寸从用户输入中提取: ${sizeMatch[1]}, 解析为: ${imageSize}`);
   }
 
-  const revisedPrompt = await reviseSentenceToPrompt(userPrompt);
+  const revisedPrompt = await reviseSentenceToPrompt(userPrompt); // Assuming reviseSentenceToPrompt doesn't need the model name
   if (!revisedPrompt || revisedPrompt.trim() === "") throw new Error("Prompt 优化后为空，无法生成图像。");
 
-  const originalImageUrl = await generateImage(revisedPrompt, imageSize);
+  // MODIFIED: Pass chosenModelName to generateImage
+  const originalImageUrl = await generateImage(revisedPrompt, imageSize, chosenModelName);
   if (!originalImageUrl) throw new Error('图像生成服务未返回有效的图像 URL (所有Key尝试后依然失败)');
 
   const encodedImageUrl = encodeURIComponent(originalImageUrl);
   const proxyImageUrl = `${new URL(request.url).origin}/image-proxy?url=${encodedImageUrl}`;
   const markdownImageString = `![Image](${proxyImageUrl})\n\n优化后的提示词: ${revisedPrompt}`;
 
+  // MODIFIED: Use chosenModelName in the response
+  const responseModelId = chosenModelName; // Or env('IMAGE_GEN_MODEL') if it was a single fixed model before, now it's dynamic
+
   return new Response(JSON.stringify({
     id: `imggen-${Date.now()}`, object: "chat.completion", created: Math.floor(Date.now() / 1000),
-    model: env('IMAGE_GEN_MODEL') || "flux-image-gen-default",
+    model: responseModelId, // Use the actual model chosen for generation
     choices: [{ index: 0, message: { role: "assistant", content: markdownImageString }, finish_reason: "stop" }],
     usage: { prompt_tokens: userPrompt.length, completion_tokens: markdownImageString.length, total_tokens: userPrompt.length + markdownImageString.length }
   }), { headers: { 'Content-Type': 'application/json' } });
@@ -177,17 +279,15 @@ async function reviseSentenceToPrompt(sentence) {
   console.log(`提示词优化模型 (${chosenModelName}) 返回的原始输出: "${rawModelOutput}"`);
 
   let actualPrompt = "";
-  let thinkingProcess = ""; // <--- 声明 thinkingProcess
+  let thinkingProcess = "";
 
   if (isReasoningMode) {
     const thinkStartTag = "<think>"; const thinkEndTag = "</think>";
     const thinkStartIndex = rawModelOutput.indexOf(thinkStartTag);
     const thinkEndIndex = rawModelOutput.indexOf(thinkEndTag, thinkStartIndex);
     if (thinkStartIndex !== -1 && thinkEndIndex !== -1 && thinkEndIndex > thinkStartIndex) {
-      // --- 提取并记录思考过程 ---
       thinkingProcess = rawModelOutput.substring(thinkStartIndex + thinkStartTag.length, thinkEndIndex).trim();
-      console.log(`(推理模式) 提取到的思考过程: "${thinkingProcess}"`); // <--- 打印思考过程
-      // --- 思考过程提取结束 ---
+      console.log(`(推理模式) 提取到的思考过程: "${thinkingProcess}"`);
       actualPrompt = rawModelOutput.substring(thinkEndIndex + thinkEndTag.length).trim();
       console.log(`(推理模式) 初步图像 prompt: "${actualPrompt}"`);
     } else {
@@ -211,26 +311,31 @@ async function reviseSentenceToPrompt(sentence) {
 }
 
 // 函数：生成图像 (支持多KEY轮值)
-async function generateImage(prompt, imageSize) {
-  console.log(`使用提示词生成图像: "${prompt}", 尺寸: ${imageSize}`);
+// MODIFIED: Added modelToUse parameter
+async function generateImage(prompt, imageSize, modelToUse) {
+  // Log now includes the specific model being used for this generation attempt
+  console.log(`使用提示词生成图像: "${prompt}", 尺寸: ${imageSize}, 模型: ${modelToUse}`);
 
   const imageApiBaseUrl = env('IMAGE_GEN_API_BASE');
-  const imageModelName = env('IMAGE_GEN_MODEL');
+  // const imageModelName = env('IMAGE_GEN_MODEL'); // This is now passed as modelToUse
   const imageApiKeysString = env('IMAGE_GEN_API_KEY');
 
   if (!imageApiBaseUrl || imageApiBaseUrl.trim() === "") {
     throw new Error("图像生成配置错误: 环境变量 IMAGE_GEN_API_BASE 未设置或为空。");
   }
-  if (!imageModelName || imageModelName.trim() === "") {
-    throw new Error("图像生成配置错误: 环境变量 IMAGE_GEN_MODEL 未设置或为空。");
+  // The modelToUse itself is validated before this function is called.
+  // We can add a check here for robustness, though it should theoretically always be valid.
+  if (!modelToUse || modelToUse.trim() === "") {
+    console.error("generateImage: 内部错误 - modelToUse 参数为空或无效。");
+    throw new Error("图像生成配置错误: 尝试使用一个无效的模型名称。");
   }
   if (!imageApiKeysString || imageApiKeysString.trim() === "") {
     throw new Error("图像生成配置错误: 环境变量 IMAGE_GEN_API_KEY 未设置或为空。");
   }
 
   const apiKeys = imageApiKeysString.split(',')
-    .map(key => key.trim()) // Trim each key
-    .filter(key => key !== ""); 
+    .map(key => key.trim())
+    .filter(key => key !== "");
 
   if (apiKeys.length === 0) {
     throw new Error("图像生成配置错误: IMAGE_GEN_API_KEY 配置了无效的密钥。请确保格式为 'key1,key2,key3' 且密钥非空。");
@@ -240,12 +345,13 @@ async function generateImage(prompt, imageSize) {
 
   for (let i = 0; i < apiKeys.length; i++) {
     const apiKey = apiKeys[i];
-    console.log(`尝试使用 API 密钥 (索引: ${i}, Key: ...${apiKey.slice(-4)}) 调用图像生成 API (${imageApiBaseUrl.trim()}) (模型: ${imageModelName.trim()})`); // Log partial key
+    // Log now correctly shows the modelToUse for each attempt
+    console.log(`尝试使用 API 密钥 (索引: ${i}, Key: ...${apiKey.slice(-4)}) 调用图像生成 API (${imageApiBaseUrl.trim()}) (模型: ${modelToUse.trim()})`);
     const requestBody = {
       prompt: prompt,
       image_size: imageSize,
-      num_inference_steps: 50,
-      model: imageModelName.trim()
+      num_inference_steps: 50, // This could also be made configurable
+      model: modelToUse.trim() // MODIFIED: Use the passed modelToUse
     };
 
     try {
@@ -261,15 +367,15 @@ async function generateImage(prompt, imageSize) {
       if (response.ok) {
         const data = await response.json();
         if (data.images && data.images.length > 0 && data.images[0].url) {
-          console.log(`使用模型 ${imageModelName.trim()} 和密钥 (索引: ${i}) 在 ${imageApiBaseUrl.trim()} 成功生成的图像 URL: ${data.images[0].url}`);
+          console.log(`使用模型 ${modelToUse.trim()} 和密钥 (索引: ${i}) 在 ${imageApiBaseUrl.trim()} 成功生成的图像 URL: ${data.images[0].url}`);
           return data.images[0].url;
         } else {
-          lastError = `API响应格式异常(图像生成，模型: ${imageModelName.trim()}): 未找到图像URL。响应内容: ${JSON.stringify(data, null, 2)}`;
+          lastError = `API响应格式异常(图像生成，模型: ${modelToUse.trim()}): 未找到图像URL。响应内容: ${JSON.stringify(data, null, 2)}`;
           console.error(lastError + ` (使用密钥索引: ${i})`);
         }
       } else {
         const errorText = await response.text();
-        lastError = `图像 API 响应状态码: ${response.status} ${response.statusText || ''} (模型: ${imageModelName.trim()}). 详细错误: ${errorText}`;
+        lastError = `图像 API 响应状态码: ${response.status} ${response.statusText || ''} (模型: ${modelToUse.trim()}). 详细错误: ${errorText}`;
         console.error(lastError + ` (使用密钥索引: ${i})`);
       }
     } catch (fetchError) {
@@ -278,8 +384,8 @@ async function generateImage(prompt, imageSize) {
     }
   }
 
-  console.error("所有 IMAGE_GEN_API_KEY 均尝试失败。");
-  const finalErrorMessage = `所有图像生成 API 密钥均尝试失败。最后一次错误: ${lastError || '未知错误'}。请检查 IMAGE_GEN_API_KEY 的配置以及上游图像生成服务状态。`;
+  console.error(`所有 IMAGE_GEN_API_KEY 均尝试失败 (模型: ${modelToUse.trim()})。`);
+  const finalErrorMessage = `所有图像生成 API 密钥均尝试失败 (针对模型 '${modelToUse.trim()}'). 最后一次错误: ${lastError || '未知错误'}。请检查 IMAGE_GEN_API_KEY 的配置以及上游图像生成服务状态。`;
   throw new Error(finalErrorMessage);
 }
 
@@ -322,7 +428,7 @@ async function handleRequest(request) {
 
   try {
     if (path === '/') {
-      const readmeUrl = "https://github.com/snakeying/Flux-Cloudflare-API"; // 你提供的链接
+      const readmeUrl = "https://github.com/snakeying/Flux-Cloudflare-API";
       const welcomeMessageHtml = `
         <!DOCTYPE html>
         <html lang="zh-CN">
@@ -371,6 +477,7 @@ async function handleRequest(request) {
     }
   } catch (e) {
     console.error("主处理程序错误:", e.message, e.stack);
+    // Ensure specific configuration errors are bubbled up with the right type
     if (e.message.includes("配置错误:") || e.message.includes("configuration error:") || e.message.includes("所有图像生成 API 密钥均尝试失败")) {
       return new Response(JSON.stringify({ error: { message: e.message, type: "configuration_error", code: "env_config_error" } }), { status: 500, headers: { 'Content-Type': 'application/json' } });
     }
@@ -381,6 +488,7 @@ async function handleRequest(request) {
 addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request).catch(err => {
     console.error("Fetch事件最终错误:", err.message, err.stack);
+    // Consistent error typing for configuration issues at the top level
     if (err.message.includes("配置错误:") || err.message.includes("configuration error:") || err.message.includes("所有图像生成 API 密钥均尝试失败")) {
       return new Response(JSON.stringify({ error: { message: err.message, type: "configuration_error", code: "env_config_error" } }), { status: 500, headers: { 'Content-Type': 'application/json' } });
     }
