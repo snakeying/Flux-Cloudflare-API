@@ -1,5 +1,5 @@
 <h1 align="center">
-# ✨ Flux Cloudflare API - 智能图像生成助手 ✨
+# ✨ IMAGEGEN Cloudflare API - 智能图像生成助手 ✨
 </h1>
 
 <p align="center">
@@ -15,22 +15,24 @@
 
 ## 🌟 主要功能
 
-*   **🖼️ 图像生成代理**: 统一接口调用后端图像生成服务。
+*   **🖼️ 双模图像生成代理**: 统一接口调用后端图像生成服务。Worker 现在能够智能区分并处理两种类型的图像生成 API：
+    *   **SILICONFLOW 类型 API**：处理那些返回图片链接、需要代理并通过 Markdown 格式封装的 API。
+    *   **直接图像类型 API**：处理那些直接返回图像数据或包含图像链接的 JSON 的 API。
 *   **🧠 智能提示词工程**:
     *   支持**非推理模式 (Non-Reasoning Mode)**：快速将用户简单想法转换为优化的图像生成提示词。
     *   支持**推理模式 (Reasoning Mode)**：模型会先进行思考过程（输出在 `<think>` 标签内），再给出最终提示词，适合更复杂的场景。
     *   严格的提示词格式和长度控制，确保最佳生成效果。
-*   **🔗 图像代理与展示优化**:
+*   **🔗 图像代理与展示优化 (主要针对 SILICONFLOW 类型 API)**:
     *   内置 `/image-proxy` 端点，可用于代理图像 URL。这对于处理那些具有时效性（如某些云存储的临时链接）或需要特定下载行为的原始图像链接特别有用，确保图像链接的直接可用性。
-    *   图像生成结果以 Markdown 格式 `![Image](PROXY_IMAGE_URL)` 返回，这种格式非常友好，**能够让生成的图片在许多支持 Markdown 的第三方应用中直接、无缝地展示出来**，同时也包含了优化后的提示词供参考。
+    *   对于 SILICONFLOW 类型的 API，图像生成结果以 Markdown 格式 `![Image](PROXY_IMAGE_URL)` 返回，这种格式非常友好，**能够让生成的图片在许多支持 Markdown 的第三方应用中直接、无缝地展示出来**，同时也包含了优化后的提示词供参考。直接图像类型 API 的响应将根据其原始输出格式进行调整。
 *   **🔑 安全认证**:
     *   Worker 级别 API 密钥认证，保护您的服务不被滥用。
-    *   支持配置多个后端图像生成 API 密钥，并进行轮询/故障切换。
+    *   支持为 `FLUX_GEN_API_KEY` 和 `IMAGE_GEN_API_KEY` 配置多个后端图像生成 API 密钥，并进行轮询/故障切换。
 *   **⚙️ 高度可配置**:
-    *   通过环境变量轻松配置所支持的图像生成模型列表。
+    *   通过环境变量 `FLUX_GEN_MODEL` 和 `IMAGE_GEN_MODEL` 轻松配置所支持的不同类型的图像生成模型列表。
     *   可配置提示词优化所使用的模型 (OpenAI GPT 系列或其他兼容模型)。
-    *   可配置图像生成 API 的基础 URL 和密钥。
-*   **📐 支持图像宽高比**: 用户可以在提示中指定宽高比 (例如，在提示词末尾添加 `16:9` 或 `1:1`)，Worker 会自动将其转换为相应的图像尺寸进行生成。目前支持的宽高比及其对应的分辨率如下：
+    *   可分别配置 Flux 类型和直接图像类型的 API 基础 URL 和密钥。
+*   **📐 支持图像宽高比**（⚠️只有图形生成API支持时生效）: 用户可以在提示中指定宽高比 (例如，在提示词末尾添加 `16:9` 或 `1:1`)，Worker 会自动将其转换为相应的图像尺寸进行生成。目前支持的宽高比及其对应的分辨率如下：
 
     | 用户输入宽高比 | 对应图像分辨率 |
     | :------------- | :------------- |
@@ -44,7 +46,7 @@
 
 *   **🌐 核心 API 端点**:
     *   `/v1/chat/completions`：核心图像生成接口 (兼容 OpenAI Completions API 格式)。
-    *   `/v1/models`：列出当前配置的可用图像生成模型。
+    *   `/v1/models`：列出当前配置的可用图像生成模型 (合并自 `FLUX_GEN_MODEL` 和 `IMAGE_GEN_MODEL`)。
     *   `/health` 或 `/v1/health`：健康检查端点。
 
 ## 🛠️ 部署与配置
@@ -60,17 +62,21 @@
 
 以下是本项目运行所必需的环境变量，请务必正确配置。**强烈**建议将敏感信息（如 API 密钥）配置为 Cloudflare Worker 的加密环境变量 (Secrets)。
 
-| 环境变量 (Secret Name)      | 是否必需 | 描述                                                                                                                               | 示例值                                           |
-| :-------------------------- | :------- | :--------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------- |
-| `AUTHORIZED_API_KEY`        | **是**   | 访问此 Worker 服务的全局 API 密钥。客户端请求时需在 `Authorization` header 中携带 `Bearer YOUR_KEY`。                                          | `WB@eYdQEp5G4Zg3g04nQMEceicdPB#`                  |
-| `IMAGE_GEN_MODEL`           | **是**   | 逗号分隔的图像生成模型 ID 列表。这些模型将通过 `/v1/models` 接口展示，并在 `/v1/chat/completions` 中接受为 `model` 参数。                      | `flux-pro,flux-schnell,stable-diffusion-xl`      |
-| `OPENAI_API_KEY`            | **是**   | 用于提示词优化的 OpenAI API 密钥 (或其他兼容模型的 API 密钥)。                                                                           | `sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx`                |
-| `OPENAI_API_BASE`           | **是**   | 用于提示词优化的 OpenAI API (或其他兼容模型) 的基础 URL。**请严格设置为 API 的基础 URL (例如: `https://api.openai.com/v1`)。**             | `https://api.openai.com/v1`                      |
-| `OPENAI_MODEL`              | **二选一** | 用于**非推理模式**提示词优化的模型名称。如果配置此项，则 `OPENAI_MODEL_REASONING` 不应配置。                                                    | `gpt-3.5-turbo`                                  |
-| `OPENAI_MODEL_REASONING`    | **二选一** | 用于**推理模式**提示词优化的模型名称。如果配置此项，则 `OPENAI_MODEL` 不应配置。                                                          | `gpt-4-turbo`                                    |
-| `IMAGE_GEN_API_BASE`        | **是**   | 实际执行图像生成的后端 API 的基础 URL。                                                                                                  | `https://api.example.com/v1/images/generations`  |
-| `IMAGE_GEN_API_KEY`         | **是**   | 逗号分隔的一个或多个后端图像生成 API 密钥。如果提供多个，Worker 会在请求失败时尝试下一个。                                                       | `key1,key2,key3`                                 |
+| 环境变量 (Secret Name)      | 是否必需 | 描述                                                                                                                                                             | 示例值                                           |
+| :-------------------------- | :------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------- |
+| `AUTHORIZED_API_KEY`        | **是**   | 访问此 Worker 服务的全局 API 密钥。客户端请求时需在 `Authorization` header 中携带 `Bearer YOUR_KEY`。                                                                | `WB@eYdQEp5G4Zg3g04nQMEceicdPB#`                  |
+| `OPENAI_API_KEY`            | **是**   | 用于提示词优化的 OpenAI API 密钥 (或其他兼容模型的 API 密钥)。                                                                                                     | `sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx`                |
+| `OPENAI_API_BASE`           | **是**   | 用于提示词优化的 OpenAI API (或其他兼容模型) 的基础 URL。**请严格设置为 API 的基础 URL (例如: `https://api.openai.com/v1`)。**                                       | `https://api.openai.com/v1`                      |
+| `OPENAI_MODEL`              | **二选一** | 用于**非推理模式**提示词优化的模型名称。如果配置此项，则 `OPENAI_MODEL_REASONING` 不应配置。                                                                          | `gpt-3.5-turbo`                                  |
+| `OPENAI_MODEL_REASONING`    | **二选一** | 用于**推理模式**提示词优化的模型名称。如果配置此项，则 `OPENAI_MODEL` 不应配置。                                                                                    | `gpt-4-turbo`                                    |
+| `FLUX_GEN_MODEL`            | **可选** | 逗号分隔的 **SILICONFLOW 类型**图像生成模型 ID 列表 (返回图片链接，需代理和 Markdown 封装)。这些模型将通过 `/v1/models` 接口展示。                                                 | `flux-pro,flux-schnell`                          |
+| `FLUX_GEN_API_BASE`         | **可选** | **SILICONFLOW 类型**图像生成 API 的基础 URL。如果配置了 `FLUX_GEN_MODEL`，则此项为必需。                                                                                      | `https://api.flux.example.com/v1/images/generate` |
+| `FLUX_GEN_API_KEY`          | **可选** | 逗号分隔的一个或多个 **SILICONFLOW 类型**图像生成 API 密钥。如果提供多个，Worker 会在请求失败时尝试下一个。如果配置了 `FLUX_GEN_MODEL`，则此项为必需。                               | `flux_key1,flux_key2`                            |
+| `IMAGE_GEN_MODEL`           | **可选** | 逗号分隔的 **直接图像类型**图像生成模型 ID 列表 (直接返回图像数据或含链接的 JSON)。这些模型将通过 `/v1/models` 接口展示。                                                 | `stable-diffusion-xl,dall-e-3-direct`            |
+| `IMAGE_GEN_API_BASE`        | **可选** | **直接图像类型**图像生成 API 的基础 URL。如果配置了 `IMAGE_GEN_MODEL`，则此项为必需。                                                                                  | `https://api.direct-image.example.com/v1/generate` |
+| `IMAGE_GEN_API_KEY`         | **可选** | 逗号分隔的一个或多个 **直接图像类型**图像生成 API 密钥。如果提供多个，Worker 会在请求失败时尝试下一个。如果配置了 `IMAGE_GEN_MODEL`，则此项为必需。                           | `direct_key1,direct_key2`                        |
 
+*至少需要配置 `FLUX_GEN_MODEL` 或 `IMAGE_GEN_MODEL` 中的一种及其对应的 API Base 和 Key。*
 
 ## 🌊 工作流程概览
 
@@ -83,18 +89,22 @@
     *   根据环境变量 (`OPENAI_MODEL` 或 `OPENAI_MODEL_REASONING`) 选择相应的提示词优化模型。
     *   调用配置的 OpenAI (或兼容) API (`OPENAI_API_BASE`, `OPENAI_API_KEY`)，将用户原始提示词发送给大语言模型进行优化，生成更专业、更适合图像生成的英文提示词。
 5.  **🎨 图像生成**:
-    *   使用优化后的提示词和解析出的图像尺寸，向配置的后端图像生成服务 (`IMAGE_GEN_API_BASE`) 发起请求。
-    *   Worker 会使用 `IMAGE_GEN_API_KEY` 中的密钥。如果配置了多个密钥，会在失败时尝试下一个。
-6.  **🔗 图像代理**:
-    *   获取到原始图像 URL 后，Worker 会将其编码，并构造成一个通过自身 `/image-proxy` 端点的代理 URL。这样做是为了：
-        *   确保链接的持久性，特别是当原始链接是临时的（如某些云存储的预签名 URL）。
+    *   Worker 根据请求中指定的 `model` 名称，判断是调用 **SILICONFLOW 类型 API** 还是 **直接图像类型 API**。
+    *   **如果模型属于 `FLUX_GEN_MODEL`**：使用优化后的提示词和解析出的图像尺寸，向配置的 `FLUX_GEN_API_BASE` 发起请求。Worker 会使用 `FLUX_GEN_API_KEY` 中的密钥。
+    *   **如果模型属于 `IMAGE_GEN_MODEL`**：使用优化后的提示词和解析出的图像尺寸，向配置的 `IMAGE_GEN_API_BASE` 发起请求。Worker 会使用 `IMAGE_GEN_API_KEY` 中的密钥。
+    *   如果对应类型的 API 密钥配置了多个，会在失败时尝试下一个。
+6.  **🔗 图像处理与代理 (针对 SILICONFLOW 类型 API)**:
+    *   对于 **SILICONFLOW 类型 API** 返回的原始图像 URL，Worker 会将其编码，并构造成一个通过自身 `/image-proxy` 端点的代理 URL。这样做是为了：
+        *   确保链接的持久性，特别是当原始链接是临时的。
         *   隐藏原始图像来源。
         *   解决潜在的 CORS 问题。
         *   提供一个可以直接在 Markdown 中渲染的图像链接。
+    *   对于 **直接图像类型 API**，Worker 会直接处理返回的图像数据或 JSON 中的链接。
 7.  **📄 格式化响应**:
-    *   将代理后的图像链接和优化后的提示词组合成 Markdown 格式。
-    *   构建符合 OpenAI Chat Completions API 格式的 JSON 响应，并返回给用户。
-8.  **✅ 完成**: 用户收到包含可直接显示的图像链接和提示词的响应。
+    *   对于 **SILICONFLOW 类型 API**：将代理后的图像链接和优化后的提示词组合成 Markdown 格式。
+    *   对于 **直接图像类型 API**：根据 API 返回的图像数据或 JSON 构造响应。
+    *   所有响应均构建为符合 OpenAI Chat Completions API 格式的 JSON，并返回给用户。
+8.  **✅ 完成**: 用户收到包含图像信息和提示词的响应。
 
 这个流程确保了从简单的用户输入到最终高质量、易于使用的图像输出的顺畅体验。
 
@@ -116,9 +126,9 @@ Worker 内置了两种提示词优化模式，通过环境变量 `OPENAI_MODEL` 
 
 ## ⚠️ 注意事项
 
-*   **API 密钥安全**: 妥善保管您的 `AUTHORIZED_API_KEY`、`OPENAI_API_KEY` 和 `IMAGE_GEN_API_KEY`。强烈建议使用 Cloudflare 的加密环境变量 (Secrets)。
+*   **API 密钥安全**: 妥善保管您的 `AUTHORIZED_API_KEY`、`OPENAI_API_KEY`、`FLUX_GEN_API_KEY` 和 `IMAGE_GEN_API_KEY`。强烈建议使用 Cloudflare 的加密环境变量 (Secrets)。
 *   **错误处理**: Worker 会返回详细的 JSON 错误信息，包括错误类型和代码，方便调试。
-*   **依赖服务**: 本 Worker 的正常运行依赖于您配置的 OpenAI (或兼容) API 服务和图像生成 API 服务的可用性。
+*   **依赖服务**: 本 Worker 的正常运行依赖于您配置的 OpenAI (或兼容) API 服务以及 SILICONFLOW 类型和/或直接图像类型的图像生成 API 服务的可用性。
 
 ## 🤝 贡献
 
