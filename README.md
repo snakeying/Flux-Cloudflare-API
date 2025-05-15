@@ -126,6 +126,7 @@ Worker 内置了两种提示词优化模式，通过环境变量 `OPENAI_MODEL` 
 
 ## ⚠️ 注意事项
 
+*   **关闭流式输出**: 请关闭流式输出以保证图片正确显示
 *   **API 密钥安全**: 妥善保管您的 `AUTHORIZED_API_KEY`、`OPENAI_API_KEY`、`FLUX_GEN_API_KEY` 和 `IMAGE_GEN_API_KEY`。强烈建议使用 Cloudflare 的加密环境变量 (Secrets)。
 *   **错误处理**: Worker 会返回详细的 JSON 错误信息，包括错误类型和代码，方便调试。
 *   **依赖服务**: 本 Worker 的正常运行依赖于您配置的 OpenAI (或兼容) API 服务以及 SILICONFLOW 类型和/或直接图像类型的图像生成 API 服务的可用性。
