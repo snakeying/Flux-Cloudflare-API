@@ -58,7 +58,7 @@ This project leverages the edge computing capabilities of Cloudflare Workers to 
 
 1.  Open **Cloudflare**, log in, create and deploy a Worker.
 2.  Set environment variables.
-3.  Delete all existing code in the worker, then copy and paste the code from [`index.js`](/index-eng.js).
+3.  Delete all existing code in the worker, then copy and paste the code from [`index-eng.js`](/index-eng.js).
 4.  Click "Deploy". You will see a simple welcome page on the test page.
 
 ### Environment Variables (Secrets)
