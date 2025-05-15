@@ -3,8 +3,12 @@
 
 const env = name => globalThis[name];
 
+// --- Global Configuration Store ---
+let workerConfig = null; // Will be populated by initializeConfig
+const MAX_IMAGE_GEN_PROVIDERS = 10; // Maximum number of IMAGE_GEN_API_BASE_n to check
+
 // --- System Prompts ---
-// For OPENAI_MODEL (non-reasoning) - Optimized based on Flux V2 Framework
+// For OPENAI_MODEL (non-reasoning)
 const systemPromptForNonReasoning = `You are a highly skilled TEXT-TO-IMAGE PROMPT GENERATOR.
 Your primary goal is to transform a user's simple idea into a concise, vivid, and effective English prompt for image generation.
 
@@ -55,7 +59,7 @@ Process the user's input based *only* on the instructions above.
 User Input: {sentence}
 Output:`;
 
-// For OPENAI_MODEL_REASONING - Optimized based on Flux V2 Framework
+// For OPENAI_MODEL_REASONING
 const systemPromptForReasoning = `You are an expert TEXT-TO-IMAGE PROMPT ENGINEER. Your task is to meticulously transform a user's simple idea into a highly effective, concise, and vivid English prompt, specifically structured for optimal image generation. You will first outline your thought process within <think> tags, and then provide the final, clean image prompt.
 
 ## YOUR PROCESS & FULL RESPONSE STRUCTURE:
@@ -141,6 +145,123 @@ Final check: OK.
 Input: {sentence}
 Output:`;
 
+// --- Initialization Function ---
+function initializeConfig() {
+  if (workerConfig) {
+    console.log("Configuration already initialized, skipping reload.");
+    return workerConfig;
+  }
+
+  console.log("Starting Worker configuration initialization...");
+  const newConfig = {
+    fluxProvider: null,
+    directImageProviders: [], // Array of { name, apiBase, apiKeys, models, providerIndex }
+    allModels: [], // Array of { id, type ('flux' or 'direct'), providerIndex (for direct), name, isConflicted, conflictReason }
+    hasFatalConflict: false,
+    fatalConflictReason: null,
+  };
+
+  // 1. Load Flux Provider Configuration
+  const fluxGenModelEnv = env('FLUX_GEN_MODEL');
+  const fluxGenApiBaseEnv = env('FLUX_GEN_API_BASE');
+  const fluxGenApiKeyEnv = env('FLUX_GEN_API_KEY');
+
+  if (fluxGenModelEnv && fluxGenApiBaseEnv && fluxGenApiKeyEnv) {
+    const fluxModels = fluxGenModelEnv.split(',').map(name => name.trim()).filter(name => name);
+    const fluxApiKeys = fluxGenApiKeyEnv.split(',').map(key => key.trim()).filter(key => key);
+    if (fluxModels.length > 0 && fluxApiKeys.length > 0) {
+      newConfig.fluxProvider = {
+        name: "FLUX_GEN",
+        apiBase: fluxGenApiBaseEnv.trim(),
+        apiKeys: fluxApiKeys,
+        models: fluxModels,
+      };
+      fluxModels.forEach(modelName => {
+        newConfig.allModels.push({ id: modelName, type: 'flux', name: modelName, isConflicted: false, conflictReason: null });
+      });
+      console.log(`Successfully loaded Flux provider configuration: ${fluxModels.length} models.`);
+    } else {
+      console.warn("Flux provider configuration incomplete (models or API keys are empty), skipped.");
+    }
+  } else if (fluxGenModelEnv || fluxGenApiBaseEnv || fluxGenApiKeyEnv) {
+    console.error("Flux provider configuration error: FLUX_GEN_MODEL, FLUX_GEN_API_BASE, and FLUX_GEN_API_KEY must all be provided. Flux provider not loaded.");
+  }
+
+  // 2. Load Direct Image Provider Configurations
+  for (let i = 1; i <= MAX_IMAGE_GEN_PROVIDERS; i++) {
+    const apiBaseEnv = env(`IMAGE_GEN_API_BASE_${i}`);
+    const modelEnv = env(`IMAGE_GEN_MODEL_${i}`);
+    const apiKeyEnv = env(`IMAGE_GEN_API_KEY_${i}`);
+
+    if (!apiBaseEnv) {
+      console.log(`IMAGE_GEN_API_BASE_${i} not found, stopping loading of more direct image providers. Loaded ${i - 1}.`);
+      break; // Stop if base URL for this index is not found
+    }
+
+    if (!modelEnv || !apiKeyEnv) {
+      console.error(`Direct image provider _${i} configuration error: IMAGE_GEN_API_BASE_${i} (${apiBaseEnv}) is set, but IMAGE_GEN_MODEL_${i} or IMAGE_GEN_API_KEY_${i} is not set or empty. This provider will be skipped.`);
+      continue; // Skip this provider if model or key is missing
+    }
+
+    const models = modelEnv.split(',').map(name => name.trim()).filter(name => name);
+    const apiKeys = apiKeyEnv.split(',').map(key => key.trim()).filter(key => key);
+
+    if (models.length === 0 || apiKeys.length === 0) {
+      console.error(`Direct image provider _${i} configuration error: IMAGE_GEN_MODEL_${i} or IMAGE_GEN_API_KEY_${i} resolved to an empty list. This provider will be skipped. (Base: ${apiBaseEnv})`);
+      continue;
+    }
+
+    const providerName = `IMAGE_GEN_${i}`;
+    newConfig.directImageProviders.push({
+      name: providerName,
+      apiBase: apiBaseEnv.trim(),
+      apiKeys: apiKeys,
+      models: models,
+      providerIndex: i,
+    });
+    models.forEach(modelName => {
+      newConfig.allModels.push({ id: modelName, type: 'direct', providerIndex: i, name: modelName, isConflicted: false, conflictReason: null });
+    });
+    console.log(`Successfully loaded direct image provider ${providerName}: ${models.length} models.`);
+  }
+
+  // 3. Model Conflict Detection
+  const modelCounts = {};
+  newConfig.allModels.forEach(modelEntry => {
+    modelCounts[modelEntry.name] = (modelCounts[modelEntry.name] || 0) + 1;
+  });
+
+  newConfig.allModels.forEach(modelEntry => {
+    if (modelCounts[modelEntry.name] > 1) {
+      modelEntry.isConflicted = true;
+      const conflictingSources = newConfig.allModels
+        .filter(m => m.name === modelEntry.name)
+        .map(m => m.type === 'flux' ? 'FLUX_GEN_MODEL' : `IMAGE_GEN_MODEL_${m.providerIndex}`)
+        .join(' and ');
+      modelEntry.conflictReason = `Model "${modelEntry.name}" is defined multiple times in ${conflictingSources}.`;
+      if (!newConfig.hasFatalConflict) { // Only set the first detected conflict as fatal for the /models endpoint
+          newConfig.hasFatalConflict = true;
+          newConfig.fatalConflictReason = modelEntry.conflictReason;
+      }
+      console.error(`Model conflict: ${modelEntry.conflictReason}`);
+    }
+  });
+
+  if (newConfig.directImageProviders.length === 0 && !newConfig.fluxProvider) {
+      console.warn("Warning: No valid image generation providers (Flux or Direct Image) configured. API may not function correctly.");
+  }
+
+  workerConfig = newConfig;
+  console.log("Worker configuration initialization complete.");
+  // console.log("Full configuration details:", JSON.stringify(workerConfig, null, 2)); // For debugging
+  return workerConfig;
+}
+
+// Call initializeConfig on worker start.
+// In a real Cloudflare Worker, this might be at the top level or triggered by the first request.
+// For now, we'll ensure it's called before handlers use workerConfig.
+// A more robust approach might involve a getter that initializes on first access.
+
 // Worker-level API key validation
 function validateWorkerApiKey(request) {
   const authHeader = request.headers.get('Authorization');
@@ -150,7 +271,7 @@ function validateWorkerApiKey(request) {
   const providedKey = authHeader.substring(7);
   const validKey = env('AUTHORIZED_API_KEY'); // Environment variable for the global API key
   if (!validKey || validKey.trim() === "") {
-      console.error("Worker global authentication configuration error: AUTHORIZED_API_KEY is not set.");
+      console.error("Worker global authentication configuration error: AUTHORIZED_API_KEY not set.");
       return false;
   }
   return providedKey === validKey;
@@ -161,42 +282,62 @@ async function handleModels(request) {
     return new Response(JSON.stringify({ error: { message: "Authentication failed, invalid API key", type: "invalid_request_error", code: "invalid_api_key" } }), { status: 401, headers: { 'Content-Type': 'application/json' } });
   }
 
-  const imageGenModelEnv = env('IMAGE_GEN_MODEL'); // Environment variable listing available image generation models
+  const config = workerConfig || initializeConfig(); // Ensure config is initialized
+
+  if (config.hasFatalConflict) {
+    console.error(`Models endpoint error: Fatal configuration conflict detected: ${config.fatalConflictReason}`);
+    return new Response(JSON.stringify({
+      error: {
+        message: `Model configuration conflict: ${config.fatalConflictReason} Please check your environment variable configuration.`,
+        type: "configuration_error",
+        code: "model_configuration_conflict"
+      }
+    }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  // Get unique model names that are not part of a fatal conflict (though hasFatalConflict should catch global issues)
+  // For /v1/models, we list all models that *could* be available if not for conflicts.
+  // The conflict error above is the primary guard. If no *fatal* conflict, list all defined model names.
+  // Individual model conflicts will be handled during chat completions.
+
+  const allDefinedModelNames = new Set();
+  if (config.fluxProvider) {
+    config.fluxProvider.models.forEach(name => allDefinedModelNames.add(name));
+  }
+  config.directImageProviders.forEach(provider => {
+    provider.models.forEach(name => allDefinedModelNames.add(name));
+  });
+
+  const uniqueModelNames = Array.from(allDefinedModelNames);
   let modelsData = [];
 
-  if (imageGenModelEnv && imageGenModelEnv.trim() !== "") {
-    const modelNames = imageGenModelEnv.split(',').map(name => name.trim()).filter(name => name);
-    if (modelNames.length > 0) {
-      modelsData = modelNames.map(modelId => ({
-        id: modelId,
-        object: "model",
+  if (uniqueModelNames.length > 0) {
+    modelsData = uniqueModelNames.map(modelId => ({
+      id: modelId,
+      object: "model",
+      created: Math.floor(Date.now() / 1000) - 8000, // Arbitrary past timestamp
+      owned_by: "organization-owner", // Placeholder
+      permission: [{
+        id: `modelperm-${modelId.replace(/[^a-zA-Z0-9-_]/g, '_')}`, // Sanitize modelId for perm id
+        object: "model_permission",
         created: Math.floor(Date.now() / 1000) - 8000,
-        owned_by: "organization-owner",
-        permission: [{
-          id: `modelperm-${modelId.replace(/[^a-zA-Z0-9-_]/g, '_')}`,
-          object: "model_permission",
-          created: Math.floor(Date.now() / 1000) - 8000,
-          allow_create_engine: false,
-          allow_sampling: true,
-          allow_logprobs: false,
-          allow_search_indices: false,
-          allow_view: true,
-          allow_fine_tuning: false,
-          organization: "*",
-          group: null,
-          is_blocking: false
-        }],
-        root: modelId,
-        parent: null
-      }));
-      console.log(`Models endpoint: Successfully loaded ${modelNames.length} model(s): ${modelNames.join(', ')}`);
-    } else {
-      console.warn("Models endpoint: IMAGE_GEN_MODEL environment variable is set but resolves to an empty list.");
-      modelsData = [{ id: "flux-image-gen-default-config-issue", object: "model", created: Math.floor(Date.now() / 1000) - 8000, owned_by: "organization-owner", permission: [{ id: "modelperm-flux-img-cfg-issue", object: "model_permission", created: Math.floor(Date.now() / 1000) - 8000, allow_create_engine: false, allow_sampling: true, allow_logprobs: false, allow_search_indices: false, allow_view: true, allow_fine_tuning: false, organization: "*", group: null, is_blocking: false }], root: "flux-image-gen-default-config-issue", parent: null }];
-    }
+        allow_create_engine: false,
+        allow_sampling: true,
+        allow_logprobs: false,
+        allow_search_indices: false,
+        allow_view: true,
+        allow_fine_tuning: false,
+        organization: "*",
+        group: null,
+        is_blocking: false
+      }],
+      root: modelId,
+      parent: null
+    }));
+    console.log(`Models endpoint: Successfully prepared ${uniqueModelNames.length} unique model definitions: ${uniqueModelNames.join(', ')}`);
   } else {
-    console.warn("Models endpoint: IMAGE_GEN_MODEL environment variable not set or empty. Returning default model 'flux-image-gen-default'.");
-    modelsData = [{ id: "flux-image-gen-default", object: "model", created: Math.floor(Date.now() / 1000) - 8000, owned_by: "organization-owner", permission: [{ id: "modelperm-flux-img-default", object: "model_permission", created: Math.floor(Date.now() / 1000) - 8000, allow_create_engine: false, allow_sampling: true, allow_logprobs: false, allow_search_indices: false, allow_view: true, allow_fine_tuning: false, organization: "*", group: null, is_blocking: false }], root: "flux-image-gen-default", parent: null }];
+    console.warn("Models endpoint: No valid models configured (Flux or Direct Image). Returning default placeholder model.");
+    modelsData = [{ id: "default-model-not-configured", object: "model", created: Math.floor(Date.now() / 1000) - 8000, owned_by: "system", permission: [], root: "default-model-not-configured", parent: null }];
   }
 
   return new Response(JSON.stringify({ object: "list", data: modelsData }), { headers: { 'Content-Type': 'application/json' } });
@@ -207,83 +348,174 @@ async function handleChatCompletions(request) {
   if (!validateWorkerApiKey(request)) return new Response(JSON.stringify({ error: { message: "Authentication failed, invalid API key", type: "invalid_request_error", code:"invalid_api_key" } }), { status: 401, headers: { 'Content-Type': 'application/json' } });
 
   let requestData;
-  try { requestData = await request.json(); } catch (e) { return new Response(JSON.stringify({ error: { message: "Failed to parse request body, please provide valid JSON", type: "invalid_request_error", code:"invalid_json" } }), { status: 400, headers: { 'Content-Type': 'application/json' } }); }
-  if (!requestData.messages || !Array.isArray(requestData.messages) || requestData.messages.length === 0) return new Response(JSON.stringify({ error: { message: "Request is missing the required 'messages' field or the format is incorrect", type: "invalid_request_error", code:"invalid_parameters" } }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+  try { requestData = await request.json(); } catch (e) { return new Response(JSON.stringify({ error: { message: "Could not parse request body, please provide valid JSON", type: "invalid_request_error", code:"invalid_json" } }), { status: 400, headers: { 'Content-Type': 'application/json' } }); }
+  if (!requestData.messages || !Array.isArray(requestData.messages) || requestData.messages.length === 0) return new Response(JSON.stringify({ error: { message: "Request missing required messages field or format is incorrect", type: "invalid_request_error", code:"invalid_parameters" } }), { status: 400, headers: { 'Content-Type': 'application/json' } });
 
   const requestedModelUntrimmed = requestData.model;
   if (!requestedModelUntrimmed || typeof requestedModelUntrimmed !== 'string' || requestedModelUntrimmed.trim() === "") {
-    console.warn(`Chat Completions: Request body is missing 'model' field or it is empty. Request body: ${JSON.stringify(requestData)}`);
+    console.warn(`Chat Completions: Request body missing 'model' field or empty. Request body: ${JSON.stringify(requestData)}`);
     return new Response(JSON.stringify({
-      error: { message: "The request body must include a valid 'model' field to specify the image generation model.", type: "invalid_request_error", code: "missing_model_field" }
+      error: { message: "Request body must include a valid 'model' field to specify the image generation model.", type: "invalid_request_error", code: "missing_model_field" }
     }), { status: 400, headers: { 'Content-Type': 'application/json' } });
   }
   const requestedModel = requestedModelUntrimmed.trim();
 
-  const allowedModelsString = env('IMAGE_GEN_MODEL'); // Environment variable for allowed image generation models
-  if (!allowedModelsString || allowedModelsString.trim() === "") {
-    console.error("Chat Completions configuration error: IMAGE_GEN_MODEL environment variable not set or empty. Cannot validate user's requested model.");
-    return new Response(JSON.stringify({
-      error: { message: "Server configuration error: The list of available image generation models is not configured.", type: "configuration_error", code: "image_models_not_configured" }
-    }), { status: 500, headers: { 'Content-Type': 'application/json' } });
-  }
-
-  const allowedModels = allowedModelsString.split(',').map(name => name.trim()).filter(name => name);
-  if (allowedModels.length === 0) {
-      console.error(`Chat Completions configuration error: IMAGE_GEN_MODEL environment variable ("${allowedModelsString}") is invalid, resulting in no available models after parsing.`);
-      return new Response(JSON.stringify({
-        error: { message: "Server configuration error: The configuration for the list of available image generation models is invalid.", type: "configuration_error", code: "image_models_invalid_config" }
-      }), { status: 500, headers: { 'Content-Type': 'application/json' } });
-  }
-
-  if (!allowedModels.includes(requestedModel)) {
-    console.warn(`Chat Completions: User requested model '${requestedModel}' is not in the allowed list [${allowedModels.join(', ')}].`);
-    return new Response(JSON.stringify({
-      error: { message: `The requested image generation model '${requestedModel}' is not supported. Available models are: ${allowedModels.join(', ')}.`, type: "invalid_request_error", code: "unsupported_image_model" }
-    }), { status: 400, headers: { 'Content-Type': 'application/json' } });
-  }
-  console.log(`Chat Completions: User requested to use model '${requestedModel}' (validated).`);
+  const config = workerConfig || initializeConfig(); // Ensure config is initialized
+  console.log(`Chat Completions: User requested model '${requestedModel}'. Configuration loaded.`);
 
   try {
-    return await handleImageGeneration(requestData, request, requestedModel);
+    // Pass the already initialized config to handleImageGeneration
+    return await handleImageGeneration(requestData, request, requestedModel, config);
   } catch (error) {
     console.error('Error handling chat completions request:', error.message, error.stack);
-    if (error.message.includes("Configuration error:") || error.message.includes("configuration error:") || error.message.includes("All image generation API keys failed")) { // Updated to check for English "Configuration error:"
-        return new Response(JSON.stringify({ error: { message: error.message, type: "configuration_error", code: "env_config_error" } }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+    // Enhanced error categorization
+    if (error.type === "configuration_error" || error.message.includes("Configuration error:") || error.message.includes("configuration error:") || error.message.includes("All image generation API keys failed") || error.message.includes("Model configuration conflict")) {
+        return new Response(JSON.stringify({ error: { message: error.message, type: "configuration_error", code: error.code || "env_config_error" } }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (error.type === "invalid_request_error") {
+        return new Response(JSON.stringify({ error: { message: error.message, type: "invalid_request_error", code: error.code || "invalid_parameters" } }), { status: 400, headers: { 'Content-Type': 'application/json' } });
     }
     return new Response(JSON.stringify({ error: { message: `Error processing request: ${error.message}`, type: "server_error", code: "internal_error" } }), { status: 500, headers: { 'Content-Type': 'application/json' } });
   }
 }
 
+// Custom error class for better error handling
+class ApiError extends Error {
+  constructor(message, type = "server_error", code = "internal_error", status = 500) {
+    super(message);
+    this.type = type;
+    this.code = code;
+    this.status = status; // HTTP status, though not directly used for throwing
+  }
+}
+
 // Handles image generation logic including prompt revision and calling the image API
-async function handleImageGeneration(requestData, request, chosenModelName) {
+async function handleImageGeneration(requestData, request, requestedModelName, config) { // config is now passed as a parameter
   const lastMessage = requestData.messages[requestData.messages.length - 1];
   let userPrompt = lastMessage.content;
   let imageSize = '1024x1024'; // Default image size
-  const sizeMatch = userPrompt.match(/([\d]+:[\d]+)/); // Extract aspect ratio like "1:1"
+  const sizeMatch = userPrompt.match(/([\d]+:[\d]+)/);
   if (sizeMatch && sizeMatch[1]) {
-      userPrompt = userPrompt.replace(sizeMatch[1], '').trim();
-      imageSize = getImageSize(sizeMatch[1]);
-      console.log(`Image size extracted from user input: ${sizeMatch[1]}, parsed as: ${imageSize}`);
+    userPrompt = userPrompt.replace(sizeMatch[1], '').trim();
+    imageSize = getImageSize(sizeMatch[1]);
+    console.log(`Image size extracted from user input: ${sizeMatch[1]}, parsed as: ${imageSize}`);
+  }
+
+  // --- Model Configuration & Selection Logic ---
+  const modelEntry = config.allModels.find(m => m.name === requestedModelName);
+
+  if (!modelEntry) {
+    const allAvailableModelNames = Array.from(new Set(config.allModels.filter(m => !m.isConflicted).map(m => m.name)));
+    const message = `Requested image generation model '${requestedModelName}' is not supported. Available models are: ${allAvailableModelNames.join(', ') || 'None (please check configuration)'}.`;
+    console.warn(`Chat Completions: ${message}`);
+    throw new ApiError(message, "invalid_request_error", "unsupported_image_model", 400);
+  }
+
+  if (modelEntry.isConflicted) {
+    const message = `Model configuration conflict: ${modelEntry.conflictReason}`;
+    console.error(`Chat Completions: ${message}`);
+    throw new ApiError(message, "configuration_error", "model_conflict", 500);
   }
 
   const revisedPrompt = await reviseSentenceToPrompt(userPrompt);
-  if (!revisedPrompt || revisedPrompt.trim() === "") throw new Error("Prompt is empty after optimization, cannot generate image.");
+  if (!revisedPrompt || revisedPrompt.trim() === "") {
+      throw new ApiError("Prompt is empty after optimization, cannot generate image.", "server_error", "prompt_optimization_failed", 500);
+  }
+  console.log(`Optimized prompt: "${revisedPrompt}" will be used for model "${requestedModelName}" (type: ${modelEntry.type})`);
 
-  const originalImageUrl = await generateImage(revisedPrompt, imageSize, chosenModelName);
-  if (!originalImageUrl) throw new Error('Image generation service did not return a valid image URL (failed after trying all keys)');
+  if (modelEntry.type === 'flux') {
+    // --- Flux Type Processing ---
+    if (!config.fluxProvider) {
+        throw new ApiError("Flux model configuration error: FLUX_GEN provider not loaded correctly.", "configuration_error", "flux_provider_missing", 500);
+    }
+    console.log(`Model "${requestedModelName}" identified as Flux type, using provider: ${config.fluxProvider.name}`);
+    const { apiBase, apiKeys } = config.fluxProvider;
 
-  const encodedImageUrl = encodeURIComponent(originalImageUrl);
-  const proxyImageUrl = `${new URL(request.url).origin}/image-proxy?url=${encodedImageUrl}`;
-  const markdownImageString = `![Image](${proxyImageUrl})\n\nOptimized prompt: ${revisedPrompt}`;
+    if (!apiBase || apiKeys.length === 0) {
+      throw new ApiError("Flux model configuration error: FLUX_GEN_API_BASE or FLUX_GEN_API_KEY not configured effectively.", "configuration_error", "flux_config_incomplete", 500);
+    }
 
-  const responseModelId = chosenModelName;
+    // generateImage already handles key rotation for Flux
+    const originalImageUrl = await generateImage(revisedPrompt, imageSize, requestedModelName, apiBase, apiKeys.join(','));
+    if (!originalImageUrl) throw new ApiError('Flux image generation service did not return a valid image URL.', "server_error", "flux_no_image_url", 500);
 
-  return new Response(JSON.stringify({
-    id: `imggen-${Date.now()}`, object: "chat.completion", created: Math.floor(Date.now() / 1000),
-    model: responseModelId,
-    choices: [{ index: 0, message: { role: "assistant", content: markdownImageString }, finish_reason: "stop" }],
-    usage: { prompt_tokens: userPrompt.length, completion_tokens: markdownImageString.length, total_tokens: userPrompt.length + markdownImageString.length }
-  }), { headers: { 'Content-Type': 'application/json' } });
+    const encodedImageUrl = encodeURIComponent(originalImageUrl);
+    const proxyImageUrl = `${new URL(request.url).origin}/image-proxy?url=${encodedImageUrl}`;
+    const markdownImageString = `![Image](${proxyImageUrl})\n\nOptimized prompt: ${revisedPrompt}`;
+
+    return new Response(JSON.stringify({
+      id: `imggen-flux-${Date.now()}`, object: "chat.completion", created: Math.floor(Date.now() / 1000),
+      model: requestedModelName,
+      choices: [{ index: 0, message: { role: "assistant", content: markdownImageString }, finish_reason: "stop" }],
+      usage: { prompt_tokens: userPrompt.length, completion_tokens: markdownImageString.length, total_tokens: userPrompt.length + markdownImageString.length }
+    }), { headers: { 'Content-Type': 'application/json' } });
+
+  } else if (modelEntry.type === 'direct') {
+    // --- Direct Image Type Processing ---
+    const provider = config.directImageProviders.find(p => p.providerIndex === modelEntry.providerIndex);
+    if (!provider) {
+      throw new ApiError(`Direct image model internal configuration error: Provider for model "${requestedModelName}" (index ${modelEntry.providerIndex}) not found.`, "configuration_error", "direct_provider_missing", 500);
+    }
+    console.log(`Model "${requestedModelName}" identified as direct image type, using provider: ${provider.name}`);
+    const { apiBase, apiKeys } = provider;
+
+    if (!apiBase || apiKeys.length === 0) {
+      throw new ApiError(`Direct image model configuration error: API Base or API Keys for provider ${provider.name} not configured effectively.`, "configuration_error", "direct_config_incomplete", 500);
+    }
+    
+    const requestBody = {
+      model: requestedModelName.trim(), // Some APIs are strict about the model name matching exactly
+      messages: [ { "role": "user", "content": revisedPrompt } ],
+      stream: false
+    };
+
+    let lastError = null;
+    console.log(`Preparing to try ${apiKeys.length} API keys for direct image model "${requestedModelName}" (provider ${provider.name}).`);
+
+    for (let i = 0; i < apiKeys.length; i++) {
+      const currentApiKey = apiKeys[i];
+      console.log(`Attempting to call direct image generation API (${apiBase}) with API key (index: ${i}, Key: ...${currentApiKey.slice(-4)}) (model: ${requestedModelName})`);
+
+      try {
+        const imageGenResponse = await fetch(apiBase, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${currentApiKey}`,
+            'Content-Type': 'application/json',
+            // 'X-Api-Key': currentApiKey, // Some APIs might use this custom header, keep if needed
+          },
+          body: JSON.stringify(requestBody),
+        });
+
+        if (imageGenResponse.ok) {
+          console.log(`Direct image API (${apiBase}) responded successfully with key (index: ${i}) (model: ${requestedModelName}).`);
+          const upstreamContentType = imageGenResponse.headers.get('Content-Type');
+          const responseHeaders = new Headers();
+          if (upstreamContentType) {
+            responseHeaders.set('Content-Type', upstreamContentType);
+          }
+          // responseHeaders.set('X-Revised-Prompt', revisedPrompt); // Optional
+          return new Response(imageGenResponse.body, {
+            status: imageGenResponse.status,
+            headers: responseHeaders
+          });
+        } else {
+          const errorText = await imageGenResponse.text();
+          lastError = `Direct image API (provider ${provider.name}) response error (key index: ${i}): ${imageGenResponse.status} ${imageGenResponse.statusText || ''}. Details: ${errorText.substring(0, 200)}`; // Limit error length
+          console.error(lastError + ` (model: ${requestedModelName}, API Base: ${apiBase})`);
+        }
+      } catch (fetchError) {
+        lastError = `Network or other error calling direct image API (provider ${provider.name}) (key index: ${i}): ${fetchError.message}`;
+        console.error(lastError + ` (model: ${requestedModelName}, API Base: ${apiBase})`);
+      }
+    }
+
+    const finalErrorMessage = `All ${apiKeys.length} API keys configured for direct image model '${requestedModelName}' (provider ${provider.name}) failed. Last error: ${lastError || 'Unknown error, failed to connect or validate any key.'}`;
+    console.error(finalErrorMessage);
+    throw new ApiError(finalErrorMessage, "configuration_error", "direct_all_keys_failed", 500);
+  }
+  // Should not be reached if modelEntry is found and type is valid
+  throw new ApiError(`Unknown model type "${modelEntry.type}" for model "${requestedModelName}".`, "server_error", "unknown_model_type", 500);
 }
 
 // Revises a user sentence into an optimized image generation prompt
@@ -291,7 +523,7 @@ async function reviseSentenceToPrompt(sentence) {
   console.log(`Original user input for optimization: "${sentence}"`);
 
   const promptApiKey = env('OPENAI_API_KEY'); // API key for the prompt optimization service
-  if (!promptApiKey || promptApiKey.trim() === "") throw new Error("Prompt optimization configuration error: Environment variable OPENAI_API_KEY is not set or empty.");
+  if (!promptApiKey || promptApiKey.trim() === "") throw new Error("Prompt optimization configuration error: Environment variable OPENAI_API_KEY not set or empty.");
 
   const modelForNonReasoning = env('OPENAI_MODEL'); // Model for non-reasoning prompt optimization
   const modelForReasoning = env('OPENAI_MODEL_REASONING'); // Model for reasoning-based prompt optimization
@@ -312,25 +544,30 @@ async function reviseSentenceToPrompt(sentence) {
 
   const promptApiBase = env('OPENAI_API_BASE'); // Base URL for the prompt optimization API
   if (!promptApiBase || promptApiBase.trim() === "") {
-      throw new Error("Prompt optimization configuration error: OPENAI_API_BASE is not set or empty. Please strictly follow the README guide to set it as the base URL for the API (e.g., https://api.openai.com/v1).");
+      throw new Error("Prompt optimization configuration error: OPENAI_API_BASE not set or empty. Please follow README instructions to set it to the API's base URL (e.g., https://api.openai.com/v1).");
   }
   const finalPromptApiUrl = `${promptApiBase.trim()}/chat/completions`;
 
   const openaiUserMessage = `Input: ${sentence}\nOutput:`;
-  console.log(`Sending request to Prompt Optimization API (${finalPromptApiUrl}) (Model: ${chosenModelName})`);
-  const response = await fetch(finalPromptApiUrl, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${promptApiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: chosenModelName,
-      messages: [{ role: 'system', content: chosenSystemPrompt }, { role: 'user', content: openaiUserMessage }]
-    }),
-  });
+  console.log(`Sending request to prompt optimization API (${finalPromptApiUrl}) (model: ${chosenModelName})`);
+const requestHeaders = {
+  'Authorization': `Bearer ${promptApiKey.trim()}`,
+  'Content-Type': 'application/json'
+};
+
+const response = await fetch(finalPromptApiUrl, {
+  method: 'POST',
+  headers: requestHeaders, // Use pre-defined requestHeaders
+  body: JSON.stringify({
+    model: chosenModelName,
+    messages: [{ role: 'system', content: chosenSystemPrompt }, { role: 'user', content: openaiUserMessage }]
+  }),
+});
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.error(`Prompt Optimization API response status: ${response.status}. Endpoint: ${finalPromptApiUrl}, Model: ${chosenModelName}. Response: ${errorText}`);
-    console.warn(`Prompt Optimization API call failed, will use original user input: "${sentence}"`);
+    console.error(`Prompt optimization API response status code: ${response.status}. Endpoint: ${finalPromptApiUrl}, Model: ${chosenModelName}. Response: ${errorText}`);
+    console.warn(`Prompt optimization API call failed, will use original user input: "${sentence}"`);
     return sentence; // Fallback to original sentence on API error
   }
   let data;
@@ -338,7 +575,7 @@ async function reviseSentenceToPrompt(sentence) {
   if (!data.choices || data.choices.length === 0 || !data.choices[0].message || !data.choices[0].message.content) { console.warn(`API response structure mismatch, will use original user input: "${sentence}"`); return sentence; }
 
   let rawModelOutput = data.choices[0].message.content;
-  console.log(`Raw output from Prompt Optimization Model (${chosenModelName}): "${rawModelOutput}"`);
+  console.log(`Raw output from prompt optimization model (${chosenModelName}): "${rawModelOutput}"`);
 
   let actualPrompt = "";
   let thinkingProcess = ""; // Only relevant for reasoning mode
@@ -349,16 +586,16 @@ async function reviseSentenceToPrompt(sentence) {
     const thinkEndIndex = rawModelOutput.indexOf(thinkEndTag, thinkStartIndex);
     if (thinkStartIndex !== -1 && thinkEndIndex !== -1 && thinkEndIndex > thinkStartIndex) {
       thinkingProcess = rawModelOutput.substring(thinkStartIndex + thinkStartTag.length, thinkEndIndex).trim();
-      console.log(`(Reasoning Mode) Extracted thinking process: "${thinkingProcess}"`);
+      console.log(`(Reasoning mode) Extracted thinking process: "${thinkingProcess}"`);
       actualPrompt = rawModelOutput.substring(thinkEndIndex + thinkEndTag.length).trim();
-      console.log(`(Reasoning Mode) Initial image prompt: "${actualPrompt}"`);
+      console.log(`(Reasoning mode) Initial image prompt: "${actualPrompt}"`);
     } else {
-      console.warn(`(Reasoning Mode) Model (${chosenModelName}) output did not find <think> structure. Using entire output. Content: "${rawModelOutput}"`);
+      console.warn(`(Reasoning mode) Model (${chosenModelName}) output did not find <think> structure. Will use entire output. Content: "${rawModelOutput}"`);
       actualPrompt = rawModelOutput.trim();
     }
   } else {
     actualPrompt = rawModelOutput.trim();
-    console.log(`(Non-Reasoning Mode) Obtained prompt: "${actualPrompt}"`);
+    console.log(`(Non-reasoning mode) Obtained prompt: "${actualPrompt}"`);
   }
 
   // Final prompt processing and validation
@@ -366,7 +603,7 @@ async function reviseSentenceToPrompt(sentence) {
   const maxWords = 50;
   if (promptWords.length === 0) { console.warn(`Processed prompt is empty, falling back to original input: "${sentence}"`); return sentence; }
   if (promptWords.length > maxWords) { actualPrompt = promptWords.slice(0, maxWords).join(" "); console.log(`Truncated image prompt: "${actualPrompt}"`);}
-  if (!actualPrompt.includes(",")) { console.warn(`Final processed image prompt ("${actualPrompt}") may not meet expected format (missing comma).`); }
+  if (!actualPrompt.includes(",")) { console.warn(`Final processed image prompt ("${actualPrompt}") may not meet expected format (missing commas).`); }
   if (actualPrompt.trim().length === 0) { console.error(`Critical error: Final image prompt is empty, will fall back to original user input: "${sentence}"`); return sentence; }
 
   console.log(`Final prompt for image generation: "${actualPrompt}"`);
@@ -374,45 +611,43 @@ async function reviseSentenceToPrompt(sentence) {
 }
 
 // Generates an image using an external API, supports multiple API keys for rotation
-async function generateImage(prompt, imageSize, modelToUse) {
-  console.log(`Generating image with prompt: "${prompt}", size: ${imageSize}, model: ${modelToUse}`);
+async function generateImage(prompt, imageSize, modelToUse, apiBaseUrl, apiKeysString) {
+  console.log(`Generating image with prompt (target: URL): "${prompt}", size: ${imageSize}, model: ${modelToUse}, API Base: ${apiBaseUrl}`);
 
-  const imageApiBaseUrl = env('IMAGE_GEN_API_BASE'); // Base URL for the image generation API
-  const imageApiKeysString = env('IMAGE_GEN_API_KEY'); // Comma-separated API keys for image generation
-
-  if (!imageApiBaseUrl || imageApiBaseUrl.trim() === "") {
-    throw new Error("Image generation configuration error: Environment variable IMAGE_GEN_API_BASE is not set or empty.");
+  if (!apiBaseUrl || apiBaseUrl.trim() === "") {
+    throw new Error(`Image generation configuration error: Passed apiBaseUrl (for model ${modelToUse}) is not set or empty.`);
   }
   if (!modelToUse || modelToUse.trim() === "") {
-    console.error("generateImage: Internal error - modelToUse parameter is empty or invalid."); // Should be caught by earlier validation
-    throw new Error("Image generation configuration error: Attempted to use an invalid model name.");
+    // This should ideally be caught before calling this function
+    console.error("generateImage (URL): Internal error - modelToUse parameter is empty or invalid.");
+    throw new Error("Image generation configuration error: Attempted to use an invalid model name (URL generation path).");
   }
-  if (!imageApiKeysString || imageApiKeysString.trim() === "") {
-    throw new Error("Image generation configuration error: Environment variable IMAGE_GEN_API_KEY is not set or empty.");
+  if (!apiKeysString || apiKeysString.trim() === "") {
+    throw new Error(`Image generation configuration error: Passed apiKeysString (for model ${modelToUse} at ${apiBaseUrl}) is not set or empty.`);
   }
 
-  const apiKeys = imageApiKeysString.split(',')
+  const apiKeys = apiKeysString.split(',')
     .map(key => key.trim())
     .filter(key => key !== "");
 
   if (apiKeys.length === 0) {
-    throw new Error("Image generation configuration error: IMAGE_GEN_API_KEY is configured with invalid keys. Ensure the format is 'key1,key2,key3' and keys are non-empty.");
+    throw new Error(`Image generation configuration error: apiKeysString (for model ${modelToUse} at ${apiBaseUrl}) configured with invalid keys.`);
   }
 
   let lastError = null;
 
   for (let i = 0; i < apiKeys.length; i++) {
     const apiKey = apiKeys[i];
-    console.log(`Attempting to call Image Generation API (${imageApiBaseUrl.trim()}) with API key (Index: ${i}, Key: ...${apiKey.slice(-4)}) (Model: ${modelToUse.trim()})`);
+    console.log(`Attempting to call image generation API (${apiBaseUrl.trim()}) with API key (index: ${i}, Key: ...${apiKey.slice(-4)}) (model: ${modelToUse.trim()}) to get URL`);
     const requestBody = {
       prompt: prompt,
       image_size: imageSize,
-      num_inference_steps: 50, // This could be configurable
+      num_inference_steps: 50,
       model: modelToUse.trim()
     };
 
     try {
-      const response = await fetch(imageApiBaseUrl.trim(), {
+      const response = await fetch(apiBaseUrl.trim(), {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${apiKey}`,
@@ -423,26 +658,27 @@ async function generateImage(prompt, imageSize, modelToUse) {
 
       if (response.ok) {
         const data = await response.json();
+        // Assuming the Flux-type API returns a URL in this structure
         if (data.images && data.images.length > 0 && data.images[0].url) {
-          console.log(`Successfully generated image URL with model ${modelToUse.trim()} and key (Index: ${i}) at ${imageApiBaseUrl.trim()}: ${data.images[0].url}`);
+          console.log(`Successfully generated image URL with model ${modelToUse.trim()} and key (index: ${i}) at ${apiBaseUrl.trim()}: ${data.images[0].url}`);
           return data.images[0].url;
         } else {
-          lastError = `API response format error (image generation, model: ${modelToUse.trim()}): Image URL not found. Response content: ${JSON.stringify(data, null, 2)}`;
+          lastError = `API response format abnormal (URL generation, model: ${modelToUse.trim()} at ${apiBaseUrl}): Image URL not found. Response content: ${JSON.stringify(data, null, 2)}`;
           console.error(lastError + ` (using key index: ${i})`);
         }
       } else {
         const errorText = await response.text();
-        lastError = `Image API response status: ${response.status} ${response.statusText || ''} (model: ${modelToUse.trim()}). Detailed error: ${errorText}`;
+        lastError = `Image API (URL generation) response status code: ${response.status} ${response.statusText || ''} (model: ${modelToUse.trim()} at ${apiBaseUrl}). Detailed error: ${errorText}`;
         console.error(lastError + ` (using key index: ${i})`);
       }
     } catch (fetchError) {
-      lastError = `Network or other error occurred when calling Image API: ${fetchError.message}`;
+      lastError = `Network or other error calling image API (URL generation): ${fetchError.message}`;
       console.error(lastError + ` (using key index: ${i})`);
     }
   }
 
-  console.error(`All IMAGE_GEN_API_KEY attempts failed (model: ${modelToUse.trim()}).`);
-  const finalErrorMessage = `All image generation API keys failed (for model '${modelToUse.trim()}'). Last error: ${lastError || 'Unknown error'}. Please check IMAGE_GEN_API_KEY configuration and upstream image generation service status.`;
+  console.error(`All API keys (from apiKeysString for ${apiBaseUrl}) failed (model: ${modelToUse.trim()}).`);
+  const finalErrorMessage = `All image generation API keys failed (for model '${modelToUse.trim()}' at ${apiBaseUrl} for URL). Last error: ${lastError || 'Unknown error'}. Please check the configuration of relevant API Key and API Base, and the status of the upstream image generation service.`;
   throw new Error(finalErrorMessage);
 }
 
@@ -479,10 +715,24 @@ async function handleImageProxy(request) {
 // Main request handler for the Worker
 async function handleRequest(request) {
   console.log(`Handling request: ${request.method} ${request.url}`);
+  const config = workerConfig || initializeConfig(); // Ensure config is initialized
+  // console.log("Current Worker configuration:", JSON.stringify(config, null, 2)); // Optional: Log current config for debugging
+
   const url = new URL(request.url);
   const path = url.pathname;
 
   try {
+    // Ensure config is available for all handlers if they somehow bypass the top-level init
+    // (though initializeConfig() should make it globally available via workerConfig)
+    if (!workerConfig && path !== '/') { // Allow root path to work even if config fails for some reason, to show welcome.
+        console.error("Critical error: Worker configuration not initialized in handleRequest.");
+        // Attempt re-initialization, though this indicates a deeper issue.
+        initializeConfig();
+        if (!workerConfig) {
+             return new Response(JSON.stringify({ error: { message: "Server configuration critical error, cannot process request.", type: "server_error", code: "config_init_failed_critical" } }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+        }
+    }
+
     if (path === '/') {
       const readmeUrl = "https://github.com/snakeying/Flux-Cloudflare-API";
       const welcomeMessageHtml = `
@@ -508,10 +758,10 @@ async function handleRequest(request) {
                 <h1>✨ Image Generation Service Successfully Deployed! ✨</h1>
                 <p>Everything is ready, let's start creating!</p>
                 <div class="important-note">
-                    <p><strong>Important Note:</strong> Before you start, please ensure all environment variable configurations meet your requirements.</p>
-                    <p>If you have any questions or encounter issues, please consult the <a href="${readmeUrl}" target="_blank" rel="noopener noreferrer">project README document</a> for detailed guidance.</p>
+                    <p><strong>Important Note:</strong> Before starting, please ensure all environment variable configurations meet your needs.</p>
+                    <p>If you have any questions or encounter issues, please consult the <a href="${readmeUrl}" target="_blank" rel="noopener noreferrer">project README documentation</a> for detailed guidance.</p>
                 </div>
-                <p>Remember to save your favorite generated works promptly. 😊</p>
+                <p>Remember to save your satisfactory generated works in time. 😊</p>
             </div>
         </body>
         </html>
@@ -533,8 +783,7 @@ async function handleRequest(request) {
     }
   } catch (e) {
     console.error("Main handler error:", e.message, e.stack);
-    // Ensure error message checking uses the translated string if necessary for logic
-    if (e.message.includes("Configuration error:") || e.message.includes("configuration error:") || e.message.includes("All image generation API keys failed")) { // Check for English "Configuration error:"
+    if (e.message.includes("Configuration error:") || e.message.includes("configuration error:") || e.message.includes("All image generation API keys failed")) {
       return new Response(JSON.stringify({ error: { message: e.message, type: "configuration_error", code: "env_config_error" } }), { status: 500, headers: { 'Content-Type': 'application/json' } });
     }
     return new Response(JSON.stringify({ error: { message: `Internal server error: ${e.message}`, type: "server_error", code: "unhandled_exception" } }), { status: 500, headers: { 'Content-Type': 'application/json' } });
@@ -544,8 +793,7 @@ async function handleRequest(request) {
 addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request).catch(err => {
     console.error("Fetch event final error:", err.message, err.stack);
-     // Ensure error message checking uses the translated string if necessary for logic
-    if (err.message.includes("Configuration error:") || err.message.includes("configuration error:") || err.message.includes("All image generation API keys failed")) { // Check for English "Configuration error:"
+    if (err.message.includes("Configuration error:") || err.message.includes("configuration error:") || err.message.includes("All image generation API keys failed")) {
       return new Response(JSON.stringify({ error: { message: err.message, type: "configuration_error", code: "env_config_error" } }), { status: 500, headers: { 'Content-Type': 'application/json' } });
     }
     return new Response(JSON.stringify({ error: { message: "Unexpected server error.", type: "catastrophic_error", code:"fatal_error" } }), { status: 500, headers: { 'Content-Type': 'application/json' } });
