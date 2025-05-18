@@ -15,10 +15,12 @@
 
 ## 😊 效果图
 
-<img style="max-width: 300px;" alt="image" src="/doc/pics/1.jpg">
-<img style="max-width: 300px;" alt="image" src="/doc/pics/2.jpg">
-<img style="max-width: 300px;" alt="image" src="/doc/pics/3.jpg">
-<img style="max-width: 300px;" alt="image" src="/doc/pics/4.jpg">
+<p align="center">
+  <img src="/doc/pics/1.jpg" style="width: 20%; max-width: 120px;">
+  <img src="/doc/pics/2.jpg" style="width: 20%; max-width: 120px;">
+  <img src="/doc/pics/3.jpg" style="width: 20%; max-width: 120px;">
+  <img src="/doc/pics/4.jpg" style="width: 20%; max-width: 120px;">
+</p>
 
 ## 🌟 主要功能
 
