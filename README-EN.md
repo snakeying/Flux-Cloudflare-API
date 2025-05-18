@@ -1,5 +1,5 @@
 <h1 align="center">
-# ✨ IMAGEGEN Cloudflare API - Intelligent Image Generation Assistant ✨
+✨ IMAGEGEN Cloudflare API - Intelligent Image Generation Assistant ✨
 </h1>
 
 <p align="center">
