@@ -15,6 +15,15 @@ This is an image generation API proxy service deployed on Cloudflare Workers. It
 
 This project leverages the edge computing capabilities of Cloudflare Workers to provide you with an efficient and scalable image generation solution. It not only proxies your image generation requests but also optimizes simple user ideas into professional prompts more suitable for image models through an integrated OpenAI model (or other API-compatible models).
 
+## 😊 Screenshots
+
+<p align="center">
+  <img src="/doc/pics/1.jpg" style="width: 20%; max-width: 120px;">
+  <img src="/doc/pics/2.jpg" style="width: 20%; max-width: 120px;">
+  <img src="/doc/pics/3.jpg" style="width: 20%; max-width: 120px;">
+  <img src="/doc/pics/4.jpg" style="width: 20%; max-width: 120px;">
+</p>
+
 ## 🌟 Key Features
 
 *   **🖼️ Multi-Vendor Image Generation Proxy**: Unified interface to call backend image generation services. The Worker can now intelligently distinguish and handle two main types of image generation API configurations:
