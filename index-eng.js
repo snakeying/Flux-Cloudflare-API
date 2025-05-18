@@ -3,11 +3,9 @@
 
 const env = name => globalThis[name];
 
-// --- Global Configuration Store ---
 let workerConfig = null; // Will be populated by initializeConfig
 const MAX_IMAGE_GEN_PROVIDERS = 10; // Maximum number of IMAGE_GEN_API_BASE_n to check
 
-// --- System Prompts ---
 // For OPENAI_MODEL (non-reasoning)
 const systemPromptForNonReasoning = `You are a highly skilled TEXT-TO-IMAGE PROMPT GENERATOR.
 Your primary goal is to transform a user's simple idea into a concise, vivid, and effective English prompt for image generation.
@@ -145,7 +143,6 @@ Final check: OK.
 Input: {sentence}
 Output:`;
 
-// --- Initialization Function ---
 function initializeConfig() {
   if (workerConfig) {
     console.log("Configuration already initialized, skipping reload.");
@@ -194,7 +191,7 @@ function initializeConfig() {
     const apiKeyEnv = env(`IMAGE_GEN_API_KEY_${i}`);
 
     if (!apiBaseEnv) {
-      console.log(`IMAGE_GEN_API_BASE_${i} not found, stopping loading of more direct image providers. Loaded ${i - 1}.`);
+      console.log(`IMAGE_GEN_API_BASE_${i} not found, stopping loading more direct image providers. Loaded ${i - 1}.`);
       break; // Stop if base URL for this index is not found
     }
 
@@ -207,7 +204,7 @@ function initializeConfig() {
     const apiKeys = apiKeyEnv.split(',').map(key => key.trim()).filter(key => key);
 
     if (models.length === 0 || apiKeys.length === 0) {
-      console.error(`Direct image provider _${i} configuration error: IMAGE_GEN_MODEL_${i} or IMAGE_GEN_API_KEY_${i} resolved to an empty list. This provider will be skipped. (Base: ${apiBaseEnv})`);
+      console.error(`Direct image provider _${i} configuration error: IMAGE_GEN_MODEL_${i} or IMAGE_GEN_API_KEY_${i} resolved to an empty list after parsing. This provider will be skipped. (Base: ${apiBaseEnv})`);
       continue;
     }
 
@@ -253,16 +250,10 @@ function initializeConfig() {
 
   workerConfig = newConfig;
   console.log("Worker configuration initialization complete.");
-  // console.log("Full configuration details:", JSON.stringify(workerConfig, null, 2)); // For debugging
   return workerConfig;
 }
 
-// Call initializeConfig on worker start.
-// In a real Cloudflare Worker, this might be at the top level or triggered by the first request.
-// For now, we'll ensure it's called before handlers use workerConfig.
-// A more robust approach might involve a getter that initializes on first access.
 
-// Worker-level API key validation
 function validateWorkerApiKey(request) {
   const authHeader = request.headers.get('Authorization');
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -336,7 +327,7 @@ async function handleModels(request) {
     }));
     console.log(`Models endpoint: Successfully prepared ${uniqueModelNames.length} unique model definitions: ${uniqueModelNames.join(', ')}`);
   } else {
-    console.warn("Models endpoint: No valid models configured (Flux or Direct Image). Returning default placeholder model.");
+    console.warn("Models endpoint: No valid models (Flux or Direct Image) configured. Returning default placeholder model.");
     modelsData = [{ id: "default-model-not-configured", object: "model", created: Math.floor(Date.now() / 1000) - 8000, owned_by: "system", permission: [], root: "default-model-not-configured", parent: null }];
   }
 
@@ -349,11 +340,11 @@ async function handleChatCompletions(request) {
 
   let requestData;
   try { requestData = await request.json(); } catch (e) { return new Response(JSON.stringify({ error: { message: "Could not parse request body, please provide valid JSON", type: "invalid_request_error", code:"invalid_json" } }), { status: 400, headers: { 'Content-Type': 'application/json' } }); }
-  if (!requestData.messages || !Array.isArray(requestData.messages) || requestData.messages.length === 0) return new Response(JSON.stringify({ error: { message: "Request missing required messages field or format is incorrect", type: "invalid_request_error", code:"invalid_parameters" } }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+  if (!requestData.messages || !Array.isArray(requestData.messages) || requestData.messages.length === 0) return new Response(JSON.stringify({ error: { message: "Request missing required 'messages' field or format is incorrect", type: "invalid_request_error", code:"invalid_parameters" } }), { status: 400, headers: { 'Content-Type': 'application/json' } });
 
   const requestedModelUntrimmed = requestData.model;
   if (!requestedModelUntrimmed || typeof requestedModelUntrimmed !== 'string' || requestedModelUntrimmed.trim() === "") {
-    console.warn(`Chat Completions: Request body missing 'model' field or empty. Request body: ${JSON.stringify(requestData)}`);
+    console.warn(`Chat Completions: Request body missing 'model' field or it's empty. Request body: ${JSON.stringify(requestData)}`);
     return new Response(JSON.stringify({
       error: { message: "Request body must include a valid 'model' field to specify the image generation model.", type: "invalid_request_error", code: "missing_model_field" }
     }), { status: 400, headers: { 'Content-Type': 'application/json' } });
@@ -379,7 +370,6 @@ async function handleChatCompletions(request) {
   }
 }
 
-// Custom error class for better error handling
 class ApiError extends Error {
   constructor(message, type = "server_error", code = "internal_error", status = 500) {
     super(message);
@@ -389,7 +379,6 @@ class ApiError extends Error {
   }
 }
 
-// Handles image generation logic including prompt revision and calling the image API
 async function handleImageGeneration(requestData, request, requestedModelName, config) { // config is now passed as a parameter
   const lastMessage = requestData.messages[requestData.messages.length - 1];
   let userPrompt = lastMessage.content;
@@ -401,12 +390,11 @@ async function handleImageGeneration(requestData, request, requestedModelName, c
     console.log(`Image size extracted from user input: ${sizeMatch[1]}, parsed as: ${imageSize}`);
   }
 
-  // --- Model Configuration & Selection Logic ---
   const modelEntry = config.allModels.find(m => m.name === requestedModelName);
 
   if (!modelEntry) {
     const allAvailableModelNames = Array.from(new Set(config.allModels.filter(m => !m.isConflicted).map(m => m.name)));
-    const message = `Requested image generation model '${requestedModelName}' is not supported. Available models are: ${allAvailableModelNames.join(', ') || 'None (please check configuration)'}.`;
+    const message = `Requested image generation model '${requestedModelName}' is not supported. Available models: ${allAvailableModelNames.join(', ') || 'None (please check configuration)'}.`;
     console.warn(`Chat Completions: ${message}`);
     throw new ApiError(message, "invalid_request_error", "unsupported_image_model", 400);
   }
@@ -419,12 +407,11 @@ async function handleImageGeneration(requestData, request, requestedModelName, c
 
   const revisedPrompt = await reviseSentenceToPrompt(userPrompt);
   if (!revisedPrompt || revisedPrompt.trim() === "") {
-      throw new ApiError("Prompt is empty after optimization, cannot generate image.", "server_error", "prompt_optimization_failed", 500);
+      throw new ApiError("Prompt became empty after optimization, cannot generate image.", "server_error", "prompt_optimization_failed", 500);
   }
   console.log(`Optimized prompt: "${revisedPrompt}" will be used for model "${requestedModelName}" (type: ${modelEntry.type})`);
 
   if (modelEntry.type === 'flux') {
-    // --- Flux Type Processing ---
     if (!config.fluxProvider) {
         throw new ApiError("Flux model configuration error: FLUX_GEN provider not loaded correctly.", "configuration_error", "flux_provider_missing", 500);
     }
@@ -451,16 +438,15 @@ async function handleImageGeneration(requestData, request, requestedModelName, c
     }), { headers: { 'Content-Type': 'application/json' } });
 
   } else if (modelEntry.type === 'direct') {
-    // --- Direct Image Type Processing ---
     const provider = config.directImageProviders.find(p => p.providerIndex === modelEntry.providerIndex);
     if (!provider) {
-      throw new ApiError(`Direct image model internal configuration error: Provider for model "${requestedModelName}" (index ${modelEntry.providerIndex}) not found.`, "configuration_error", "direct_provider_missing", 500);
+      throw new ApiError(`Direct image model internal configuration error: Provider not found for model "${requestedModelName}" (index ${modelEntry.providerIndex}).`, "configuration_error", "direct_provider_missing", 500);
     }
     console.log(`Model "${requestedModelName}" identified as direct image type, using provider: ${provider.name}`);
     const { apiBase, apiKeys } = provider;
 
     if (!apiBase || apiKeys.length === 0) {
-      throw new ApiError(`Direct image model configuration error: API Base or API Keys for provider ${provider.name} not configured effectively.`, "configuration_error", "direct_config_incomplete", 500);
+      throw new ApiError(`Direct image model configuration error: Provider ${provider.name}'s API Base or API Keys not configured effectively.`, "configuration_error", "direct_config_incomplete", 500);
     }
     
     const requestBody = {
@@ -482,7 +468,6 @@ async function handleImageGeneration(requestData, request, requestedModelName, c
           headers: {
             'Authorization': `Bearer ${currentApiKey}`,
             'Content-Type': 'application/json',
-            // 'X-Api-Key': currentApiKey, // Some APIs might use this custom header, keep if needed
           },
           body: JSON.stringify(requestBody),
         });
@@ -501,16 +486,16 @@ async function handleImageGeneration(requestData, request, requestedModelName, c
           });
         } else {
           const errorText = await imageGenResponse.text();
-          lastError = `Direct image API (provider ${provider.name}) response error (key index: ${i}): ${imageGenResponse.status} ${imageGenResponse.statusText || ''}. Details: ${errorText.substring(0, 200)}`; // Limit error length
+          lastError = `Direct image API (provider ${provider.name}) responded with error (key index: ${i}): ${imageGenResponse.status} ${imageGenResponse.statusText || ''}. Details: ${errorText.substring(0, 200)}`; // Limit error length
           console.error(lastError + ` (model: ${requestedModelName}, API Base: ${apiBase})`);
         }
       } catch (fetchError) {
-        lastError = `Network or other error calling direct image API (provider ${provider.name}) (key index: ${i}): ${fetchError.message}`;
+        lastError = `Network or other error occurred while calling direct image API (provider ${provider.name}) (key index: ${i}): ${fetchError.message}`;
         console.error(lastError + ` (model: ${requestedModelName}, API Base: ${apiBase})`);
       }
     }
 
-    const finalErrorMessage = `All ${apiKeys.length} API keys configured for direct image model '${requestedModelName}' (provider ${provider.name}) failed. Last error: ${lastError || 'Unknown error, failed to connect or validate any key.'}`;
+    const finalErrorMessage = `All configured API keys (${apiKeys.length}) for direct image model '${requestedModelName}' (provider ${provider.name}) failed. Last attempted error: ${lastError || 'Unknown error, failed to connect or validate any key.'}`;
     console.error(finalErrorMessage);
     throw new ApiError(finalErrorMessage, "configuration_error", "direct_all_keys_failed", 500);
   }
@@ -518,12 +503,22 @@ async function handleImageGeneration(requestData, request, requestedModelName, c
   throw new ApiError(`Unknown model type "${modelEntry.type}" for model "${requestedModelName}".`, "server_error", "unknown_model_type", 500);
 }
 
-// Revises a user sentence into an optimized image generation prompt
 async function reviseSentenceToPrompt(sentence) {
   console.log(`Original user input for optimization: "${sentence}"`);
 
-  const promptApiKey = env('OPENAI_API_KEY'); // API key for the prompt optimization service
-  if (!promptApiKey || promptApiKey.trim() === "") throw new Error("Prompt optimization configuration error: Environment variable OPENAI_API_KEY not set or empty.");
+  const promptApiKeysString = env('OPENAI_API_KEY'); // API keys for the prompt optimization service
+  if (!promptApiKeysString || promptApiKeysString.trim() === "") {
+    throw new Error("Prompt optimization configuration error: Environment variable OPENAI_API_KEY not set or empty.");
+  }
+
+  const promptApiKeys = promptApiKeysString.split(',')
+    .map(key => key.trim())
+    .filter(key => key !== "");
+
+  if (promptApiKeys.length === 0) {
+    throw new Error("Prompt optimization configuration error: OPENAI_API_KEY configured with invalid keys (empty list after split).");
+  }
+  console.log(`Loaded ${promptApiKeys.length} OPENAI_API_KEY(s) for prompt optimization.`);
 
   const modelForNonReasoning = env('OPENAI_MODEL'); // Model for non-reasoning prompt optimization
   const modelForReasoning = env('OPENAI_MODEL_REASONING'); // Model for reasoning-based prompt optimization
@@ -544,73 +539,120 @@ async function reviseSentenceToPrompt(sentence) {
 
   const promptApiBase = env('OPENAI_API_BASE'); // Base URL for the prompt optimization API
   if (!promptApiBase || promptApiBase.trim() === "") {
-      throw new Error("Prompt optimization configuration error: OPENAI_API_BASE not set or empty. Please follow README instructions to set it to the API's base URL (e.g., https://api.openai.com/v1).");
+      throw new Error("Prompt optimization configuration error: OPENAI_API_BASE not set or empty. Please set it to the base URL of the API (e.g., https://api.openai.com/v1) as per README guidance.");
   }
   const finalPromptApiUrl = `${promptApiBase.trim()}/chat/completions`;
-
   const openaiUserMessage = `Input: ${sentence}\nOutput:`;
-  console.log(`Sending request to prompt optimization API (${finalPromptApiUrl}) (model: ${chosenModelName})`);
-const requestHeaders = {
-  'Authorization': `Bearer ${promptApiKey.trim()}`,
-  'Content-Type': 'application/json'
-};
 
-const response = await fetch(finalPromptApiUrl, {
-  method: 'POST',
-  headers: requestHeaders, // Use pre-defined requestHeaders
-  body: JSON.stringify({
-    model: chosenModelName,
-    messages: [{ role: 'system', content: chosenSystemPrompt }, { role: 'user', content: openaiUserMessage }]
-  }),
-});
+  let lastError = null;
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error(`Prompt optimization API response status code: ${response.status}. Endpoint: ${finalPromptApiUrl}, Model: ${chosenModelName}. Response: ${errorText}`);
-    console.warn(`Prompt optimization API call failed, will use original user input: "${sentence}"`);
-    return sentence; // Fallback to original sentence on API error
-  }
-  let data;
-  try { data = await response.json(); } catch (e) { console.warn(`Failed to parse JSON, will use original user input: "${sentence}"`); return sentence; }
-  if (!data.choices || data.choices.length === 0 || !data.choices[0].message || !data.choices[0].message.content) { console.warn(`API response structure mismatch, will use original user input: "${sentence}"`); return sentence; }
+  for (let i = 0; i < promptApiKeys.length; i++) {
+    const currentApiKey = promptApiKeys[i];
+    console.log(`Attempting to call prompt optimization API (${finalPromptApiUrl}) with OPENAI_API_KEY (index: ${i}, Key: ...${currentApiKey.slice(-4)}) (model: ${chosenModelName})`);
 
-  let rawModelOutput = data.choices[0].message.content;
-  console.log(`Raw output from prompt optimization model (${chosenModelName}): "${rawModelOutput}"`);
+    const requestHeaders = {
+      'Authorization': `Bearer ${currentApiKey}`,
+      'Content-Type': 'application/json'
+    };
 
-  let actualPrompt = "";
-  let thinkingProcess = ""; // Only relevant for reasoning mode
+    try {
+      const response = await fetch(finalPromptApiUrl, {
+        method: 'POST',
+        headers: requestHeaders,
+        body: JSON.stringify({
+          model: chosenModelName,
+          messages: [{ role: 'system', content: chosenSystemPrompt }, { role: 'user', content: openaiUserMessage }],
+        }),
+      });
 
-  if (isReasoningMode) {
-    const thinkStartTag = "<think>"; const thinkEndTag = "</think>";
-    const thinkStartIndex = rawModelOutput.indexOf(thinkStartTag);
-    const thinkEndIndex = rawModelOutput.indexOf(thinkEndTag, thinkStartIndex);
-    if (thinkStartIndex !== -1 && thinkEndIndex !== -1 && thinkEndIndex > thinkStartIndex) {
-      thinkingProcess = rawModelOutput.substring(thinkStartIndex + thinkStartTag.length, thinkEndIndex).trim();
-      console.log(`(Reasoning mode) Extracted thinking process: "${thinkingProcess}"`);
-      actualPrompt = rawModelOutput.substring(thinkEndIndex + thinkEndTag.length).trim();
-      console.log(`(Reasoning mode) Initial image prompt: "${actualPrompt}"`);
-    } else {
-      console.warn(`(Reasoning mode) Model (${chosenModelName}) output did not find <think> structure. Will use entire output. Content: "${rawModelOutput}"`);
-      actualPrompt = rawModelOutput.trim();
+      if (response.ok) {
+        console.log(`Prompt optimization API responded successfully with key (index: ${i}) (model: ${chosenModelName})`);
+        let data;
+        try { data = await response.json(); } catch (e) {
+          lastError = `Failed to parse JSON response from prompt optimization API (key index: ${i}): ${e.message}`;
+          console.warn(`${lastError}. Response status: ${response.status}. Will try next key or fallback.`);
+          continue;
+        }
+
+        if (!data.choices || data.choices.length === 0 || !data.choices[0].message) {
+          lastError = `Prompt optimization API response structure mismatch (key index: ${i}), missing 'choices[0].message'. Response: ${JSON.stringify(data)}`;
+          console.warn(`${lastError}. Will try next key or fallback.`);
+          continue;
+        }
+
+        let actualPrompt = "";
+        let thinkingProcess = "";
+
+        if (isReasoningMode) {
+          const messageContent = data.choices[0].message.content || "";
+          const reasoningFieldContent = data.choices[0].message.reasoning_content || "";
+          console.log(`(Reasoning mode) Model (${chosenModelName}) returned: content='${messageContent.substring(0,100)}...', reasoning_content='${reasoningFieldContent.substring(0,100)}...' (using key index ${i})`);
+
+          const thinkStartTag = "<think>";
+          const thinkEndTag = "</think>";
+          const thinkStartIndex = messageContent.indexOf(thinkStartTag);
+          const thinkEndIndex = messageContent.indexOf(thinkEndTag, thinkStartIndex + thinkStartTag.length);
+
+          if (thinkStartIndex !== -1 && thinkEndIndex !== -1 && thinkEndIndex > thinkStartIndex) {
+            thinkingProcess = messageContent.substring(thinkStartIndex + thinkStartTag.length, thinkEndIndex).trim();
+            actualPrompt = messageContent.substring(thinkEndIndex + thinkEndTag.length).trim();
+            console.log(`(Reasoning mode) Extracted thinking process via <think> tags: "${thinkingProcess.substring(0,100)}..." and prompt: "${actualPrompt.substring(0,100)}..."`);
+          } else if (reasoningFieldContent) {
+            thinkingProcess = reasoningFieldContent.trim();
+            actualPrompt = messageContent.trim();
+            console.log(`(Reasoning mode) Extracted thinking process via 'reasoning_content' field: "${thinkingProcess.substring(0,100)}...", main 'content' as prompt: "${actualPrompt.substring(0,100)}..."`);
+            if (!actualPrompt) {
+              console.warn(`(Reasoning mode) Model provided thinking process via 'reasoning_content', but main 'content' is empty. Cannot get final prompt. Will fall back to original input.`);
+              return sentence; // Perform fallback
+            }
+          } else {
+            console.warn(`(Reasoning mode) Model (${chosenModelName}) output did not find <think>...</think> structure, and 'reasoning_content' not found. Will use entire output content as prompt. Content: "${messageContent.substring(0,100)}..."`);
+            actualPrompt = messageContent.trim();
+          }
+        } else { // Non-reasoning mode
+          actualPrompt = (data.choices[0].message.content || "").trim();
+          console.log(`(Non-reasoning mode) Obtained prompt: "${actualPrompt.substring(0,100)}..."`);
+        }
+
+        // Post-processing logic, acts on actualPrompt
+        if (actualPrompt.trim().length === 0) {
+          console.warn(`Processed prompt is empty (key index ${i}), will try next key or fallback. Original model output (content): "${data.choices[0].message.content || ""}", (reasoning_content): "${data.choices[0].message.reasoning_content || ""}"`);
+          lastError = `Processed prompt is empty (key index ${i})`;
+          continue;
+        }
+
+        const promptWords = actualPrompt.split(/\s+/).filter(Boolean);
+        const maxWords = 50;
+        if (promptWords.length > maxWords) {
+          actualPrompt = promptWords.slice(0, maxWords).join(" ");
+          console.log(`Truncated image prompt: "${actualPrompt}"`);
+        }
+        if (!actualPrompt.includes(",")) {
+          console.warn(`Final processed image prompt ("${actualPrompt}") may not meet expected format (missing comma).`);
+        }
+        
+        console.log(`Final prompt for image generation: "${actualPrompt}" (from key index ${i})`);
+        if (thinkingProcess) {
+            console.log(`Associated thinking process: "${thinkingProcess.substring(0, 200)}..."`);
+        }
+        return actualPrompt; // Success, return the prompt
+      } else {
+        const errorText = await response.text();
+        lastError = `Prompt optimization API responded with error (key index: ${i}): ${response.status} ${response.statusText || ''}. Endpoint: ${finalPromptApiUrl}, Model: ${chosenModelName}. Response: ${errorText.substring(0, 200)}`;
+        console.error(lastError);
+      }
+    } catch (fetchError) {
+      lastError = `Network or other error occurred while calling prompt optimization API (key index: ${i}): ${fetchError.message}`;
+      console.error(lastError);
     }
-  } else {
-    actualPrompt = rawModelOutput.trim();
-    console.log(`(Non-reasoning mode) Obtained prompt: "${actualPrompt}"`);
   }
 
-  // Final prompt processing and validation
-  const promptWords = actualPrompt.split(/\s+/).filter(Boolean);
-  const maxWords = 50;
-  if (promptWords.length === 0) { console.warn(`Processed prompt is empty, falling back to original input: "${sentence}"`); return sentence; }
-  if (promptWords.length > maxWords) { actualPrompt = promptWords.slice(0, maxWords).join(" "); console.log(`Truncated image prompt: "${actualPrompt}"`);}
-  if (!actualPrompt.includes(",")) { console.warn(`Final processed image prompt ("${actualPrompt}") may not meet expected format (missing commas).`); }
-  if (actualPrompt.trim().length === 0) { console.error(`Critical error: Final image prompt is empty, will fall back to original user input: "${sentence}"`); return sentence; }
-
-  console.log(`Final prompt for image generation: "${actualPrompt}"`);
-  return actualPrompt;
+  // If loop completes, all keys failed
+  console.error(`All OPENAI_API_KEY(s) (${promptApiKeys.length}) failed for prompt optimization. Last error: ${lastError || 'Unknown error'}`);
+  console.warn(`Prompt optimization API all key calls failed, will use original user input: "${sentence}"`);
+  return sentence; // Fallback to original sentence
 }
 
-// Generates an image using an external API, supports multiple API keys for rotation
 async function generateImage(prompt, imageSize, modelToUse, apiBaseUrl, apiKeysString) {
   console.log(`Generating image with prompt (target: URL): "${prompt}", size: ${imageSize}, model: ${modelToUse}, API Base: ${apiBaseUrl}`);
 
@@ -620,7 +662,7 @@ async function generateImage(prompt, imageSize, modelToUse, apiBaseUrl, apiKeysS
   if (!modelToUse || modelToUse.trim() === "") {
     // This should ideally be caught before calling this function
     console.error("generateImage (URL): Internal error - modelToUse parameter is empty or invalid.");
-    throw new Error("Image generation configuration error: Attempted to use an invalid model name (URL generation path).");
+    throw new Error("Image generation configuration error: Attempting to use an invalid model name (URL generation path).");
   }
   if (!apiKeysString || apiKeysString.trim() === "") {
     throw new Error(`Image generation configuration error: Passed apiKeysString (for model ${modelToUse} at ${apiBaseUrl}) is not set or empty.`);
@@ -668,27 +710,25 @@ async function generateImage(prompt, imageSize, modelToUse, apiBaseUrl, apiKeysS
         }
       } else {
         const errorText = await response.text();
-        lastError = `Image API (URL generation) response status code: ${response.status} ${response.statusText || ''} (model: ${modelToUse.trim()} at ${apiBaseUrl}). Detailed error: ${errorText}`;
+        lastError = `Image API (URL generation) responded with status code: ${response.status} ${response.statusText || ''} (model: ${modelToUse.trim()} at ${apiBaseUrl}). Detailed error: ${errorText}`;
         console.error(lastError + ` (using key index: ${i})`);
       }
     } catch (fetchError) {
-      lastError = `Network or other error calling image API (URL generation): ${fetchError.message}`;
+      lastError = `Network or other error occurred while calling image API (URL generation): ${fetchError.message}`;
       console.error(lastError + ` (using key index: ${i})`);
     }
   }
 
   console.error(`All API keys (from apiKeysString for ${apiBaseUrl}) failed (model: ${modelToUse.trim()}).`);
-  const finalErrorMessage = `All image generation API keys failed (for model '${modelToUse.trim()}' at ${apiBaseUrl} for URL). Last error: ${lastError || 'Unknown error'}. Please check the configuration of relevant API Key and API Base, and the status of the upstream image generation service.`;
+  const finalErrorMessage = `All image generation API keys failed (for model '${modelToUse.trim()}' at ${apiBaseUrl} for URL). Last error: ${lastError || 'Unknown error'}. Please check the configuration of relevant API Keys and API Base, as well as the upstream image generation service status.`;
   throw new Error(finalErrorMessage);
 }
 
-// Converts aspect ratio string to image size string
 function getImageSize(ratio) {
   const sizeMap = {'1:1':'1024x1024', '1:2':'512x1024', '3:2':'768x512', '3:4':'768x1024', '16:9':'1024x576', '9:16':'576x1024'};
   return sizeMap[ratio] || '1024x1024'; // Default if ratio not found
 }
 
-// Proxies image requests to avoid CORS issues or hide original URL
 async function handleImageProxy(request) {
   const url = new URL(request.url);
   const originalImageUrl = url.searchParams.get('url');
@@ -712,11 +752,9 @@ async function handleImageProxy(request) {
   }
 }
 
-// Main request handler for the Worker
 async function handleRequest(request) {
   console.log(`Handling request: ${request.method} ${request.url}`);
-  const config = workerConfig || initializeConfig(); // Ensure config is initialized
-  // console.log("Current Worker configuration:", JSON.stringify(config, null, 2)); // Optional: Log current config for debugging
+  const config = workerConfig || initializeConfig();
 
   const url = new URL(request.url);
   const path = url.pathname;
