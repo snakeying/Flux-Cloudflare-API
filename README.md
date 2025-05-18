@@ -13,6 +13,13 @@
 
 本项目通过 Cloudflare Workers 的边缘计算能力，为您提供了一个高效、可扩展的图像生成解决方案。它不仅能代理您的图像生成请求，还能通过集成的 OpenAI 模型（或其他兼容 API 的模型）对用户输入的简单想法进行优化，生成更适合图像模型的专业提示词。
 
+## 😊 效果图
+
+<img style="max-width: 600px;" alt="image" src="/doc/pics/1.jpg">
+<img style="max-width: 600px;" alt="image" src="/doc/pics/2.jpg">
+<img style="max-width: 600px;" alt="image" src="/doc/pics/3.jpg">
+<img style="max-width: 600px;" alt="image" src="/doc/pics/4.jpg">
+
 ## 🌟 主要功能
 
 *   **🖼️ 多供应商图像生成代理**: 统一接口调用后端图像生成服务。Worker 现在能够智能区分并处理两种主要类型的图像生成 API 配置：
