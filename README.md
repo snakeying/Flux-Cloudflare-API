@@ -15,10 +15,10 @@
 
 ## 😊 效果图
 
-<img style="max-width: 600px;" alt="image" src="/doc/pics/1.jpg">
-<img style="max-width: 600px;" alt="image" src="/doc/pics/2.jpg">
-<img style="max-width: 600px;" alt="image" src="/doc/pics/3.jpg">
-<img style="max-width: 600px;" alt="image" src="/doc/pics/4.jpg">
+<img style="max-width: 300px;" alt="image" src="/doc/pics/1.jpg">
+<img style="max-width: 300px;" alt="image" src="/doc/pics/2.jpg">
+<img style="max-width: 300px;" alt="image" src="/doc/pics/3.jpg">
+<img style="max-width: 300px;" alt="image" src="/doc/pics/4.jpg">
 
 ## 🌟 主要功能
 
