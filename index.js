@@ -3,11 +3,9 @@
 
 const env = name => globalThis[name];
 
-// --- Global Configuration Store ---
 let workerConfig = null; // Will be populated by initializeConfig
 const MAX_IMAGE_GEN_PROVIDERS = 10; // Maximum number of IMAGE_GEN_API_BASE_n to check
 
-// --- System Prompts ---
 // For OPENAI_MODEL (non-reasoning)
 const systemPromptForNonReasoning = `You are a highly skilled TEXT-TO-IMAGE PROMPT GENERATOR.
 Your primary goal is to transform a user's simple idea into a concise, vivid, and effective English prompt for image generation.
@@ -145,7 +143,6 @@ Final check: OK.
 Input: {sentence}
 Output:`;
 
-// --- Initialization Function ---
 function initializeConfig() {
   if (workerConfig) {
     console.log("配置已初始化，跳过重复加载。");
@@ -253,16 +250,10 @@ function initializeConfig() {
 
   workerConfig = newConfig;
   console.log("Worker 配置初始化完成。");
-  // console.log("完整配置详情:", JSON.stringify(workerConfig, null, 2)); // For debugging
   return workerConfig;
 }
 
-// Call initializeConfig on worker start.
-// In a real Cloudflare Worker, this might be at the top level or triggered by the first request.
-// For now, we'll ensure it's called before handlers use workerConfig.
-// A more robust approach might involve a getter that initializes on first access.
 
-// Worker-level API key validation
 function validateWorkerApiKey(request) {
   const authHeader = request.headers.get('Authorization');
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -379,7 +370,6 @@ async function handleChatCompletions(request) {
   }
 }
 
-// Custom error class for better error handling
 class ApiError extends Error {
   constructor(message, type = "server_error", code = "internal_error", status = 500) {
     super(message);
@@ -389,7 +379,6 @@ class ApiError extends Error {
   }
 }
 
-// Handles image generation logic including prompt revision and calling the image API
 async function handleImageGeneration(requestData, request, requestedModelName, config) { // config is now passed as a parameter
   const lastMessage = requestData.messages[requestData.messages.length - 1];
   let userPrompt = lastMessage.content;
@@ -401,7 +390,6 @@ async function handleImageGeneration(requestData, request, requestedModelName, c
     console.log(`图像尺寸从用户输入中提取: ${sizeMatch[1]}, 解析为: ${imageSize}`);
   }
 
-  // --- Model Configuration & Selection Logic ---
   const modelEntry = config.allModels.find(m => m.name === requestedModelName);
 
   if (!modelEntry) {
@@ -424,7 +412,6 @@ async function handleImageGeneration(requestData, request, requestedModelName, c
   console.log(`优化后的提示词: "${revisedPrompt}" 将用于模型 "${requestedModelName}" (类型: ${modelEntry.type})`);
 
   if (modelEntry.type === 'flux') {
-    // --- Flux Type Processing ---
     if (!config.fluxProvider) {
         throw new ApiError("Flux 模型配置错误: FLUX_GEN 提供商未正确加载。", "configuration_error", "flux_provider_missing", 500);
     }
@@ -451,7 +438,6 @@ async function handleImageGeneration(requestData, request, requestedModelName, c
     }), { headers: { 'Content-Type': 'application/json' } });
 
   } else if (modelEntry.type === 'direct') {
-    // --- Direct Image Type Processing ---
     const provider = config.directImageProviders.find(p => p.providerIndex === modelEntry.providerIndex);
     if (!provider) {
       throw new ApiError(`直接图像模型配置内部错误: 未找到模型 "${requestedModelName}" 对应的提供商 (索引 ${modelEntry.providerIndex})。`, "configuration_error", "direct_provider_missing", 500);
@@ -482,7 +468,6 @@ async function handleImageGeneration(requestData, request, requestedModelName, c
           headers: {
             'Authorization': `Bearer ${currentApiKey}`,
             'Content-Type': 'application/json',
-            // 'X-Api-Key': currentApiKey, // Some APIs might use this custom header, keep if needed
           },
           body: JSON.stringify(requestBody),
         });
@@ -518,12 +503,22 @@ async function handleImageGeneration(requestData, request, requestedModelName, c
   throw new ApiError(`未知的模型类型 "${modelEntry.type}" 用于模型 "${requestedModelName}"。`, "server_error", "unknown_model_type", 500);
 }
 
-// Revises a user sentence into an optimized image generation prompt
 async function reviseSentenceToPrompt(sentence) {
   console.log(`原始用户输入用于优化: "${sentence}"`);
 
-  const promptApiKey = env('OPENAI_API_KEY'); // API key for the prompt optimization service
-  if (!promptApiKey || promptApiKey.trim() === "") throw new Error("提示词优化配置错误: 环境变量 OPENAI_API_KEY 未设置或为空。");
+  const promptApiKeysString = env('OPENAI_API_KEY'); // API keys for the prompt optimization service
+  if (!promptApiKeysString || promptApiKeysString.trim() === "") {
+    throw new Error("提示词优化配置错误: 环境变量 OPENAI_API_KEY 未设置或为空。");
+  }
+
+  const promptApiKeys = promptApiKeysString.split(',')
+    .map(key => key.trim())
+    .filter(key => key !== "");
+
+  if (promptApiKeys.length === 0) {
+    throw new Error("提示词优化配置错误: OPENAI_API_KEY 配置了无效的密钥 (分割后为空列表)。");
+  }
+  console.log(`加载了 ${promptApiKeys.length} 个用于提示词优化的 OPENAI_API_KEY。`);
 
   const modelForNonReasoning = env('OPENAI_MODEL'); // Model for non-reasoning prompt optimization
   const modelForReasoning = env('OPENAI_MODEL_REASONING'); // Model for reasoning-based prompt optimization
@@ -547,70 +542,117 @@ async function reviseSentenceToPrompt(sentence) {
       throw new Error("提示词优化配置错误: OPENAI_API_BASE 未设置或为空。请严格按照 README 指导设置为 API 的基础 URL (例如: https://api.openai.com/v1)。");
   }
   const finalPromptApiUrl = `${promptApiBase.trim()}/chat/completions`;
-
   const openaiUserMessage = `Input: ${sentence}\nOutput:`;
-  console.log(`发送请求到提示词优化 API (${finalPromptApiUrl}) (模型: ${chosenModelName})`);
-const requestHeaders = {
-  'Authorization': `Bearer ${promptApiKey.trim()}`,
-  'Content-Type': 'application/json'
-};
 
-const response = await fetch(finalPromptApiUrl, {
-  method: 'POST',
-  headers: requestHeaders, // 使用预先定义的 requestHeaders
-  body: JSON.stringify({
-    model: chosenModelName,
-    messages: [{ role: 'system', content: chosenSystemPrompt }, { role: 'user', content: openaiUserMessage }]
-  }),
-});
+  let lastError = null;
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error(`提示词优化 API 响应状态码: ${response.status}. 端点: ${finalPromptApiUrl}, 模型: ${chosenModelName}. 响应: ${errorText}`);
-    console.warn(`提示词优化 API 调用失败，将使用原始用户输入: "${sentence}"`);
-    return sentence; // Fallback to original sentence on API error
-  }
-  let data;
-  try { data = await response.json(); } catch (e) { console.warn(`解析JSON失败，将使用原始用户输入: "${sentence}"`); return sentence; }
-  if (!data.choices || data.choices.length === 0 || !data.choices[0].message || !data.choices[0].message.content) { console.warn(`API响应结构不符，将使用原始用户输入: "${sentence}"`); return sentence; }
+  for (let i = 0; i < promptApiKeys.length; i++) {
+    const currentApiKey = promptApiKeys[i];
+    console.log(`尝试使用 OPENAI_API_KEY (索引: ${i}, Key: ...${currentApiKey.slice(-4)}) 调用提示词优化 API (${finalPromptApiUrl}) (模型: ${chosenModelName})`);
 
-  let rawModelOutput = data.choices[0].message.content;
-  console.log(`提示词优化模型 (${chosenModelName}) 返回的原始输出: "${rawModelOutput}"`);
+    const requestHeaders = {
+      'Authorization': `Bearer ${currentApiKey}`,
+      'Content-Type': 'application/json'
+    };
 
-  let actualPrompt = "";
-  let thinkingProcess = ""; // Only relevant for reasoning mode
+    try {
+      const response = await fetch(finalPromptApiUrl, {
+        method: 'POST',
+        headers: requestHeaders,
+        body: JSON.stringify({
+          model: chosenModelName,
+          messages: [{ role: 'system', content: chosenSystemPrompt }, { role: 'user', content: openaiUserMessage }],
+        }),
+      });
 
-  if (isReasoningMode) {
-    const thinkStartTag = "<think>"; const thinkEndTag = "</think>";
-    const thinkStartIndex = rawModelOutput.indexOf(thinkStartTag);
-    const thinkEndIndex = rawModelOutput.indexOf(thinkEndTag, thinkStartIndex);
-    if (thinkStartIndex !== -1 && thinkEndIndex !== -1 && thinkEndIndex > thinkStartIndex) {
-      thinkingProcess = rawModelOutput.substring(thinkStartIndex + thinkStartTag.length, thinkEndIndex).trim();
-      console.log(`(推理模式) 提取到的思考过程: "${thinkingProcess}"`);
-      actualPrompt = rawModelOutput.substring(thinkEndIndex + thinkEndTag.length).trim();
-      console.log(`(推理模式) 初步图像 prompt: "${actualPrompt}"`);
-    } else {
-      console.warn(`(推理模式) 模型 (${chosenModelName}) 输出未找到 <think> 结构。将用整个输出。内容: "${rawModelOutput}"`);
-      actualPrompt = rawModelOutput.trim();
+      if (response.ok) {
+        console.log(`提示词优化 API 使用密钥 (索引: ${i}) 成功响应 (模型: ${chosenModelName})`);
+        let data;
+        try { data = await response.json(); } catch (e) {
+          lastError = `解析提示词优化 API 的 JSON 响应失败 (密钥索引: ${i}): ${e.message}`;
+          console.warn(`${lastError}。响应状态: ${response.status}。将尝试下一个密钥或回退。`);
+          continue;
+        }
+
+        if (!data.choices || data.choices.length === 0 || !data.choices[0].message) {
+          lastError = `提示词优化 API 响应结构不符 (密钥索引: ${i})，缺少 'choices[0].message'。响应: ${JSON.stringify(data)}`;
+          console.warn(`${lastError}。将尝试下一个密钥或回退。`);
+          continue;
+        }
+
+        let actualPrompt = "";
+        let thinkingProcess = "";
+
+        if (isReasoningMode) {
+          const messageContent = data.choices[0].message.content || "";
+          const reasoningFieldContent = data.choices[0].message.reasoning_content || "";
+          console.log(`(推理模式) 模型 (${chosenModelName}) 返回: content='${messageContent.substring(0,100)}...', reasoning_content='${reasoningFieldContent.substring(0,100)}...' (使用密钥索引 ${i})`);
+
+          const thinkStartTag = "<think>";
+          const thinkEndTag = "</think>";
+          const thinkStartIndex = messageContent.indexOf(thinkStartTag);
+          const thinkEndIndex = messageContent.indexOf(thinkEndTag, thinkStartIndex + thinkStartTag.length);
+
+          if (thinkStartIndex !== -1 && thinkEndIndex !== -1 && thinkEndIndex > thinkStartIndex) {
+            thinkingProcess = messageContent.substring(thinkStartIndex + thinkStartTag.length, thinkEndIndex).trim();
+            actualPrompt = messageContent.substring(thinkEndIndex + thinkEndTag.length).trim();
+            console.log(`(推理模式) 通过 <think> 标签提取到思考过程: "${thinkingProcess.substring(0,100)}..." 和提示词: "${actualPrompt.substring(0,100)}..."`);
+          } else if (reasoningFieldContent) {
+            thinkingProcess = reasoningFieldContent.trim();
+            actualPrompt = messageContent.trim();
+            console.log(`(推理模式) 通过 'reasoning_content' 字段提取到思考过程: "${thinkingProcess.substring(0,100)}...", 主 'content' 作为提示词: "${actualPrompt.substring(0,100)}..."`);
+            if (!actualPrompt) {
+              console.warn(`(推理模式) 模型通过 'reasoning_content' 提供了思考过程，但主 'content' 为空，无法获取最终提示词。将回退到原始输入。`);
+              return sentence; // 执行回退
+            }
+          } else {
+            console.warn(`(推理模式) 模型 (${chosenModelName}) 输出未找到 <think>...</think> 结构，且未找到 'reasoning_content'。将用整个输出内容作为提示词。内容: "${messageContent.substring(0,100)}..."`);
+            actualPrompt = messageContent.trim();
+          }
+        } else { // 非推理模式
+          actualPrompt = (data.choices[0].message.content || "").trim();
+          console.log(`(非推理模式) 获取到的 prompt: "${actualPrompt.substring(0,100)}..."`);
+        }
+
+        // 后续处理逻辑，作用于 actualPrompt
+        if (actualPrompt.trim().length === 0) {
+          console.warn(`处理后 prompt 为空 (密钥索引 ${i})，将尝试下一个密钥或回退。原始模型输出 (content): "${data.choices[0].message.content || ""}", (reasoning_content): "${data.choices[0].message.reasoning_content || ""}"`);
+          lastError = `处理后 prompt 为空 (密钥索引 ${i})`;
+          continue;
+        }
+
+        const promptWords = actualPrompt.split(/\s+/).filter(Boolean);
+        const maxWords = 50;
+        if (promptWords.length > maxWords) {
+          actualPrompt = promptWords.slice(0, maxWords).join(" ");
+          console.log(`截断后的图像 prompt: "${actualPrompt}"`);
+        }
+        if (!actualPrompt.includes(",")) {
+          console.warn(`最终处理后的图像 prompt ("${actualPrompt}") 可能不符合预期格式 (缺少逗号)。`);
+        }
+        
+        console.log(`最终用于图像生成的 prompt: "${actualPrompt}" (来自密钥索引 ${i})`);
+        if (thinkingProcess) {
+            console.log(`关联的思考过程: "${thinkingProcess.substring(0, 200)}..."`);
+        }
+        return actualPrompt; // Success, return the prompt
+      } else {
+        const errorText = await response.text();
+        lastError = `提示词优化 API 响应错误 (密钥索引: ${i}): ${response.status} ${response.statusText || ''}. 端点: ${finalPromptApiUrl}, 模型: ${chosenModelName}. 响应: ${errorText.substring(0, 200)}`;
+        console.error(lastError);
+      }
+    } catch (fetchError) {
+      lastError = `调用提示词优化 API 时发生网络或其他错误 (密钥索引: ${i}): ${fetchError.message}`;
+      console.error(lastError);
     }
-  } else {
-    actualPrompt = rawModelOutput.trim();
-    console.log(`(非推理模式) 获取到的 prompt: "${actualPrompt}"`);
   }
 
-  // Final prompt processing and validation
-  const promptWords = actualPrompt.split(/\s+/).filter(Boolean);
-  const maxWords = 50;
-  if (promptWords.length === 0) { console.warn(`处理后 prompt 为空，回退到原始输入: "${sentence}"`); return sentence; }
-  if (promptWords.length > maxWords) { actualPrompt = promptWords.slice(0, maxWords).join(" "); console.log(`截断后的图像 prompt: "${actualPrompt}"`);}
-  if (!actualPrompt.includes(",")) { console.warn(`最终处理后的图像 prompt ("${actualPrompt}") 可能不符合预期格式 (缺少逗号)。`); }
-  if (actualPrompt.trim().length === 0) { console.error(`关键错误：最终图像 prompt 为空，将回退到原始用户输入: "${sentence}"`); return sentence; }
-
-  console.log(`最终用于图像生成的 prompt: "${actualPrompt}"`);
-  return actualPrompt;
+  // If loop completes, all keys failed
+  console.error(`所有 OPENAI_API_KEY (${promptApiKeys.length}个) 均尝试失败用于提示词优化。最后一次错误: ${lastError || '未知错误'}`);
+  console.warn(`提示词优化 API 所有密钥调用均失败，将使用原始用户输入: "${sentence}"`);
+  return sentence; // Fallback to original sentence
 }
 
-// Generates an image using an external API, supports multiple API keys for rotation
 async function generateImage(prompt, imageSize, modelToUse, apiBaseUrl, apiKeysString) {
   console.log(`使用提示词生成图像 (目标: URL): "${prompt}", 尺寸: ${imageSize}, 模型: ${modelToUse}, API Base: ${apiBaseUrl}`);
 
@@ -682,13 +724,11 @@ async function generateImage(prompt, imageSize, modelToUse, apiBaseUrl, apiKeysS
   throw new Error(finalErrorMessage);
 }
 
-// Converts aspect ratio string to image size string
 function getImageSize(ratio) {
   const sizeMap = {'1:1':'1024x1024', '1:2':'512x1024', '3:2':'768x512', '3:4':'768x1024', '16:9':'1024x576', '9:16':'576x1024'};
   return sizeMap[ratio] || '1024x1024'; // Default if ratio not found
 }
 
-// Proxies image requests to avoid CORS issues or hide original URL
 async function handleImageProxy(request) {
   const url = new URL(request.url);
   const originalImageUrl = url.searchParams.get('url');
@@ -712,11 +752,9 @@ async function handleImageProxy(request) {
   }
 }
 
-// Main request handler for the Worker
 async function handleRequest(request) {
   console.log(`处理请求: ${request.method} ${request.url}`);
-  const config = workerConfig || initializeConfig(); // Ensure config is initialized
-  // console.log("当前 Worker 配置:", JSON.stringify(config, null, 2)); // Optional: Log current config for debugging
+  const config = workerConfig || initializeConfig();
 
   const url = new URL(request.url);
   const path = url.pathname;
